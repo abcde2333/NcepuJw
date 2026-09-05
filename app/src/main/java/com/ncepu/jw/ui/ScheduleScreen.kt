@@ -1,6 +1,7 @@
 package com.ncepu.jw.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -34,19 +36,24 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.background as bg2
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures as bg2
 import com.ncepu.jw.data.Course
 import com.ncepu.jw.data.SettingsStore
 import com.ncepu.jw.data.Semester
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
+import kotlin.math.max
 
 private val CourseColors = listOf(
     Color(0xFFE05565), Color(0xFF4A90D9), Color(0xFFE0913C), Color(0xFF67B279),
@@ -180,9 +187,45 @@ fun ScheduleScreen(
             }
         }
 
-        // ---- 网格 ----
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        // ---- 网格(WEEK 模式下左右滑动切换周次) ----
+        val density = LocalDensity.current
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .then(
+                    if (mode == "WEEK") Modifier.pointerInput(selectedWeek) {
+                        var acc = 0f
+                        val threshold = 90.dp.toPx()
+                        detectHorizontalDragGestures(
+                            onDragStart = { acc = 0f },
+                            onDragEnd = { acc = 0f },
+                            onDragCancel = { acc = 0f },
+                        ) { change, amount ->
+                            change.consume()
+                            acc += amount
+                            while (acc >= threshold) {
+                                if (selectedWeek < 30) onWeekChange(selectedWeek + 1)
+                                acc -= threshold
+                            }
+                            while (acc <= -threshold) {
+                                if (selectedWeek > 1) onWeekChange(selectedWeek - 1)
+                                acc += threshold
+                            }
+                        }
+                    } else Modifier
+                ),
+        ) {
+            if (loading) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
             when {
+                courses.isNotEmpty() -> CourseGrid(
+                    courses = courses,
+                    showWeeks = mode == "ALL",
+                    sectionTimes = sectionTimes,
+                    onBackground = bgEnabled,
+                )
                 loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
                 }
@@ -194,12 +237,9 @@ fun ScheduleScreen(
                             modifier = Modifier.clickable { onRetry() })
                     }
                 }
-                else -> CourseGrid(
-                    courses = courses,
-                    showWeeks = mode == "ALL",
-                    sectionTimes = sectionTimes,
-                    onBackground = bgEnabled,
-                )
+                else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("本学期暂无课程", color = MaterialTheme.colorScheme.outline)
+                }
             }
         }
     }
@@ -274,7 +314,10 @@ private fun CourseGrid(
 ) {
     val slots = remember(sectionTimes) { sectionSlots(sectionTimes) }
     val rowH = 46.dp
-    val colW = 52.dp
+    val timeColW = 44.dp
+    // 7 列自适应屏宽:一屏完整显示周一~周日,无需横向滚动
+    val screenW = LocalConfiguration.current.screenWidthDp.toFloat()
+    val colW = max(((screenW - timeColW.value - 10f) / 7f), 40f).dp
     val todayIdx = remember {
         val dow = Calendar.getInstance().get(Calendar.DAY_OF_WEEK)
         when (dow) {
@@ -287,14 +330,12 @@ private fun CourseGrid(
         courses.map { it.name }.distinct().withIndex().associate { (i, n) -> n to i }
     }
     val gridH = rowH * slots.size
-    val hScroll = rememberScrollState()
 
     Column(Modifier.fillMaxSize()) {
-        // 表头(与主体共享横向滚动)
+        // 表头
         Row(
             Modifier
-                .padding(start = 52.dp)
-                .horizontalScroll(hScroll),
+                .padding(start = timeColW.value.dp),
         ) {
             DAY_LABELS.forEachIndexed { i, label ->
                 Box(
@@ -322,7 +363,7 @@ private fun CourseGrid(
                 .fillMaxSize(),
         ) {
             // 时间轴
-            Column(Modifier.width(52.dp)) {
+            Column(Modifier.width(timeColW)) {
                 slots.forEach { (no, start, end) ->
                     Box(Modifier.height(rowH).fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Text(
@@ -333,8 +374,8 @@ private fun CourseGrid(
                     }
                 }
             }
-            // 7 天列(与表头同步滚动)
-            Row(Modifier.horizontalScroll(hScroll)) {
+            // 7 天列
+            Row {
                 DAY_LABELS.indices.forEach { dayCol ->
                     val day = dayCol + 1
                     val dayCourses = courses.filter { it.day == day }
