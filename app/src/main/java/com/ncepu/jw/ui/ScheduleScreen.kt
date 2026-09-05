@@ -7,9 +7,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,11 +28,11 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,29 +41,27 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures as bg2
 import com.ncepu.jw.data.Course
 import com.ncepu.jw.data.SettingsStore
 import com.ncepu.jw.data.Semester
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 private val CourseColors = listOf(
     Color(0xFFE05565), Color(0xFF4A90D9), Color(0xFFE0913C), Color(0xFF67B279),
@@ -86,7 +83,7 @@ fun parseWeeks(weeks: String): Set<Int>? {
 }
 
 /** 六大节开始时间 → 12 个小节的 (节号, 开始, 结束)
- *  华电作息:每节 45 分钟,大节内两节间课间 10 分钟(如 08:00-08:45 / 08:55-09:40) */
+ *  华电作息:每节 45 分钟,大节内两节间课间 10 分钟 */
 internal fun sectionSlots(times: List<String>): List<Triple<Int, String, String>> {
     val out = mutableListOf<Triple<Int, String, String>>()
     val cal = Calendar.getInstance()
@@ -103,11 +100,51 @@ internal fun sectionSlots(times: List<String>): List<Triple<Int, String, String>
     return out
 }
 
+private data class PlacedCourse(val course: Course, val day: Int, val colIdx: Int, val colCount: Int)
+
+/** 一天内课程放置:节次重叠的课聚类后水平分栏(参考时光课表的冲突处理) */
+private fun placeCourses(courses: List<Course>): List<PlacedCourse> {
+    val out = mutableListOf<PlacedCourse>()
+    for ((day, list) in courses.groupBy { it.day }) {
+        val sorted = list.sortedBy { it.sections.first }
+        var i = 0
+        while (i < sorted.size) {
+            var clusterEnd = sorted[i].sections.last
+            var j = i
+            while (j + 1 < sorted.size && sorted[j + 1].sections.first <= clusterEnd) {
+                j++
+                clusterEnd = maxOf(clusterEnd, sorted[j].sections.last)
+            }
+            // 簇内贪心分列(区间图着色)
+            val colEnds = mutableListOf<Int>()
+            val colOf = mutableMapOf<Int, Int>()
+            for (k in i..j) {
+                val c = sorted[k]
+                var ci = colEnds.indexOfFirst { it < c.sections.first }
+                if (ci < 0) {
+                    colEnds.add(c.sections.last)
+                    ci = colEnds.size - 1
+                } else {
+                    colEnds[ci] = c.sections.last
+                }
+                colOf[k] = ci
+            }
+            val cols = colEnds.size
+            for (k in i..j) {
+                out += PlacedCourse(sorted[k], day, colOf[k] ?: 0, cols)
+            }
+            i = j + 1
+        }
+    }
+    return out
+}
+
 /**
  * 课表页。
- * mode = WEEK:官方"我的周课表"(首页同源,按日期查询,周次由教务系统计算,零误差)
- * mode = ALL :学期全量课表(旧接口,卡片带周次)
+ * mode = WEEK:官方"我的周课表"(首页同源,周次由教务系统计算,零误差),左右滑切换周次
+ * mode = ALL :学期全量课表(卡片带周次,非本周的课降透明度)
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ScheduleScreen(
     loading: Boolean,
@@ -127,6 +164,7 @@ fun ScheduleScreen(
     onRetry: () -> Unit,
     onOpenExams: (() -> Unit)? = null,
 ) {
+    var selectedCourse by remember { mutableStateOf<Course?>(null) }
     val today = Calendar.getInstance()
 
     Column(Modifier.fillMaxSize()) {
@@ -166,7 +204,7 @@ fun ScheduleScreen(
                         )
                         if (selectedWeek != officialWeek) {
                             Text(
-                                "本周第${officialWeek}周",
+                                "(本周第${officialWeek}周)",
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.outline,
                                 modifier = Modifier
@@ -215,7 +253,7 @@ fun ScheduleScreen(
                             onDragCancel = { acc = 0f },
                         ) { change, amount ->
                             change.consume()
-                            acc -= amount
+                            acc -= amount // 手指左滑 = 下一周
                             while (acc >= threshold) {
                                 if (selectedWeek < 30) onWeekChange(selectedWeek + 1)
                                 acc -= threshold
@@ -247,19 +285,57 @@ fun ScheduleScreen(
                     data != null -> CourseGrid(
                         courses = data,
                         showWeeks = mode == "ALL",
+                        selectedWeek = selectedWeek,
                         sectionTimes = sectionTimes,
                         onBackground = bgEnabled,
+                        onCourseClick = { selectedCourse = it },
                     )
-                    error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    error != null && courses.isEmpty() -> Box(
+                        Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(error, color = MaterialTheme.colorScheme.error,
-                                textAlign = TextAlign.Center, modifier = Modifier.padding(24.dp))
-                            Text("点此重试", color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.clickable { onRetry() })
+                            Text(
+                                error, color = MaterialTheme.colorScheme.error,
+                                textAlign = TextAlign.Center, modifier = Modifier.padding(24.dp),
+                            )
+                            Text(
+                                "点此重试", color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.clickable { onRetry() },
+                            )
                         }
                     }
                     else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
+                    }
+                }
+            }
+        }
+
+        // ---- 课程详情 ----
+        selectedCourse?.let { c ->
+            androidx.compose.material3.ModalBottomSheet(onDismissRequest = { selectedCourse = null }) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp)
+                        .padding(bottom = 28.dp),
+                ) {
+                    Text(c.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    listOf(
+                        "地点" to c.room,
+                        "周次" to c.weeks,
+                        "学分" to c.credit,
+                        "节次" to "第${c.sections.first}-${c.sections.last}节",
+                        "属性" to c.attr,
+                        "分组" to c.group,
+                    ).forEach { (k, v) ->
+                        if (v.isNotBlank()) Text(
+                            "$k:$v",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(vertical = 3.dp),
+                        )
                     }
                 }
             }
@@ -326,18 +402,19 @@ fun SemesterBar(
     }
 }
 
-/** 竖排网格:行=小节(带时间轴),列=星期,课程块按节次跨行 */
+/** 竖排网格:固定表头 + 自定义 Layout 平铺课程块(冲突课自动分栏),点击弹详情 */
 @Composable
 private fun CourseGrid(
     courses: List<Course>,
     showWeeks: Boolean,
+    selectedWeek: Int,
     sectionTimes: List<String>,
     onBackground: Boolean,
+    onCourseClick: (Course) -> Unit,
 ) {
     val slots = remember(sectionTimes) { sectionSlots(sectionTimes) }
     val rowH = 46.dp
     val timeColW = 44.dp
-    // 7 列自适应屏宽:一屏完整显示周一~周日,无需横向滚动
     val screenW = LocalConfiguration.current.screenWidthDp.toFloat()
     val colW = max(((screenW - timeColW.value - 10f) / 7f), 40f).dp
     val todayIdx = remember {
@@ -348,17 +425,14 @@ private fun CourseGrid(
             else -> 7
         }
     }
-    val colorIdx = remember(courses) {
-        courses.map { it.name }.distinct().withIndex().associate { (i, n) -> n to i }
-    }
+    val placed = remember(courses) { placeCourses(courses) }
     val gridH = rowH * slots.size
+    val colWpx = with(LocalDensity.current) { colW.toPx() }
+    val rowHpx = with(LocalDensity.current) { rowH.toPx() }
 
     Column(Modifier.fillMaxSize()) {
         // 表头
-        Row(
-            Modifier
-                .padding(start = timeColW.value.dp),
-        ) {
+        Row(Modifier.padding(start = timeColW)) {
             DAY_LABELS.forEachIndexed { i, label ->
                 Box(
                     Modifier
@@ -378,13 +452,12 @@ private fun CourseGrid(
             }
         }
 
-        // 主体:时间轴 + 7 天列
+        // 主体:时间轴 + 自定义 Layout 课程网格(垂直滚动)
         Row(
             Modifier
                 .verticalScroll(rememberScrollState())
                 .fillMaxSize(),
         ) {
-            // 时间轴
             Column(Modifier.width(timeColW)) {
                 slots.forEach { (no, start, end) ->
                     Box(Modifier.height(rowH).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -396,66 +469,64 @@ private fun CourseGrid(
                     }
                 }
             }
-            // 7 天列
-            Row {
-                DAY_LABELS.indices.forEach { dayCol ->
-                    val day = dayCol + 1
-                    val dayCourses = courses.filter { it.day == day }
-                    Box(
-                        Modifier
-                            .width(colW)
-                            .height(gridH)
-                            .padding(1.dp)
-                            .then(
-                                if (day == todayIdx && !onBackground)
-                                    Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.04f))
-                                else Modifier
-                            ),
-                    ) {
-                        dayCourses.forEach { c ->
-                            val startRow = (c.sections.first - 1).coerceIn(0, slots.size - 1)
-                            val span = (c.sections.last - c.sections.first + 1)
-                                .coerceIn(1, slots.size - startRow)
-                            val fg = CourseColors[(colorIdx[c.name] ?: 0) % CourseColors.size]
+            Layout(
+                content = {
+                    placed.forEach { p ->
+                        // 全部周次模式下,非所选周的课降透明度
+                        val dimmed = selectedWeek != 0 &&
+                            parseWeeks(p.course.weeks)?.contains(selectedWeek) == false
+                        Box(
+                            Modifier
+                                .padding(1.dp)
+                                .alpha(if (dimmed) 0.35f else 1f)
+                                .clickable { onCourseClick(p.course) },
+                        ) {
+                            val colorIdx = abs(p.course.name.hashCode()) % CourseColors.size
+                            val fg = CourseColors[colorIdx]
                             Card(
                                 shape = RoundedCornerShape(8.dp),
                                 colors = androidx.compose.material3.CardDefaults.cardColors(
                                     containerColor = fg.copy(alpha = if (onBackground) 0.92f else 0.95f),
                                 ),
-                                modifier = Modifier
-                                    .offset(y = rowH * startRow + 1.dp)
-                                    .width(colW - 4.dp)
-                                    .height(rowH * span - 2.dp),
+                                modifier = Modifier.fillMaxSize(),
                             ) {
                                 Column(Modifier.padding(4.dp)) {
                                     Text(
-                                        c.name,
+                                        p.course.name,
                                         fontSize = 10.sp, lineHeight = 12.sp,
                                         color = Color.White, fontWeight = FontWeight.Bold,
                                         maxLines = 4,
                                     )
-                                    if (c.room.isNotBlank()) Text(
-                                        "@${c.room}",
+                                    if (p.course.room.isNotBlank()) Text(
+                                        "@${p.course.room}",
                                         fontSize = 9.sp, lineHeight = 10.sp,
                                         color = Color.White.copy(alpha = 0.95f),
                                         maxLines = 3,
-                                    )
-                                    if (span >= 2 && c.teacher.isNotBlank()) Text(
-                                        c.teacher,
-                                        fontSize = 9.sp,
-                                        color = Color.White.copy(alpha = 0.85f),
-                                        maxLines = 2,
-                                    )
-                                    if (showWeeks && c.weeks.isNotBlank()) Text(
-                                        c.weeks,
-                                        fontSize = 8.sp,
-                                        color = Color.White.copy(alpha = 0.8f),
-                                        maxLines = 1,
                                     )
                                 }
                             }
                         }
                     }
+                },
+            ) { measurables, constraints ->
+                val placeables = measurables.mapIndexed { index, m ->
+                    val p = placed[index]
+                    val w = (colWpx / p.colCount).roundToInt() - 2
+                    val h = ((p.course.sections.last - p.course.sections.first + 1) * rowHpx).roundToInt() - 2
+                    val x = ((p.day - 1) * colWpx).roundToInt() + 1
+                    val y = ((p.course.sections.first - 1) * rowHpx).roundToInt() + 1
+                    Triple(
+                        m.measure(
+                            Constraints(
+                                minWidth = w.coerceAtLeast(1), maxWidth = w.coerceAtLeast(1),
+                                minHeight = h.coerceAtLeast(1), maxHeight = h.coerceAtLeast(1),
+                            )
+                        ),
+                        x, y,
+                    )
+                }
+                layout((colWpx * 7).roundToInt(), (rowHpx * slots.size).roundToInt()) {
+                    placeables.forEach { (pl, x, y) -> pl.place(x, y) }
                 }
             }
         }

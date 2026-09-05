@@ -488,6 +488,8 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
                     teacher = "",
                     room = get("上课地点"),
                     credit = get("课程学分"),
+                    group = get("分组名称"),
+                    attr = get("课程属性"),
                 )
             }
         }

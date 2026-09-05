@@ -46,7 +46,9 @@ data class Course(
     val weeks: String,      // 周次说明,如 "2-9(周)"(可能多段合并)
     val teacher: String,    // 教师(该部署常为空)
     val room: String,       // 教室
-    val credit: String      // 学分(课表视图不提供,为空)
+    val credit: String,     // 学分
+    val group: String = "", // 分组名称(如课堂派班)
+    val attr: String = "",  // 课程属性(必修/选修)
 )
 
 /** 单门课程成绩 */
