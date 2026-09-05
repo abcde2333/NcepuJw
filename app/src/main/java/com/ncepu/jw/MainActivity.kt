@@ -200,7 +200,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 查询某周对应的日期(以官方当前周为锚,取该周周一) */
+    /** 查询某周对应的日期(以官方当前周为锚,取该周周中-周四):
+     *  周四是"绝对属于目标周"的日子,避开周日/周一的周定义边界(深信服按周日开新周) */
     private fun weekRqText(week: Int): String {
         val base = if (officialWeek > 0) officialWeek
         else SettingsStore.currentWeek(System.currentTimeMillis(), settings.weekStartMillis)
@@ -208,12 +209,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         val dow = cal.get(Calendar.DAY_OF_WEEK)
         cal.add(Calendar.DAY_OF_MONTH, -((dow + 5) % 7)) // 回到本周一
         cal.add(Calendar.DAY_OF_MONTH, (week - base) * 7)
+        cal.add(Calendar.DAY_OF_MONTH, 3)                // 周一 → 周四(周中)
         return java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(cal.time)
     }
-
-    private fun todayText(): String =
-        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
-            .format(java.util.Date())
 
     /** 学期全量课表("全部周次"模式);silent=true 时仅更新提醒缓存,不改变界面 */
     fun loadScheduleFull(silent: Boolean = false) {
