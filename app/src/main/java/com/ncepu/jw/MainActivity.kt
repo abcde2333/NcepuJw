@@ -111,6 +111,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var schedMode by mutableStateOf("WEEK")      // WEEK=官方周课表 / ALL=学期全量
     var officialWeek by mutableStateOf(0)        // 官方当前周(教务系统计算)
     var selectedWeek by mutableStateOf(0)        // 当前查看的周(0=全部)
+    var loadedWeek by mutableStateOf(-1)         // courses 当前对应的周(过渡动画判定)
+
+    // 周课表缓存:切回已看过的周瞬时显示,不重复请求
+    private val homeCache = mutableMapOf<Int, List<Course>>()
+
+    fun cachedWeek(week: Int): List<Course>? = homeCache[week]
 
     var gradeSem by mutableStateOf(Semester.current())
     var gradeLoading by mutableStateOf(false)
@@ -151,6 +157,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 name = client.studentName
                 settings.storeCredentials(account.trim(), password)
                 loadHomeWeek(null)
+                loadScheduleFull(silent = true)
                 loadGrades()
             } else {
                 loginError = err
@@ -158,23 +165,33 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 官方"我的周课表":按周查询(周次由教务系统计算,零误差) */
+    /** 官方"我的周课表":按周查询(周次由教务系统计算,零误差);结果按周缓存 */
     fun loadHomeWeek(week: Int?) {
+        val target = week
+            ?: officialWeek.takeIf { it > 0 }
+            ?: SettingsStore.currentWeek(System.currentTimeMillis(), settings.weekStartMillis)
+                .coerceIn(1, 30)
+        selectedWeek = target
+        schedMode = "WEEK"
+
+        // 缓存命中:瞬时切换
+        homeCache[target]?.let { cached ->
+            courses = cached
+            loadedWeek = target
+            schedError = if (cached.isEmpty()) "本周暂无课程" else null
+            return
+        }
+
         schedLoading = true
         schedError = null
         viewModelScope.launch {
             try {
-                val rqText = week?.let { weekRqText(it) } ?: todayText()
-                val hw = client.fetchHomeWeek(rqText)
+                val hw = client.fetchHomeWeek(weekRqText(target))
                 if (hw.week > 0) officialWeek = hw.week
+                homeCache[target] = hw.courses
                 courses = hw.courses
-                schedMode = "WEEK"
-                selectedWeek = week ?: officialWeek
-                settings.cacheCourses(courses)
-                if (settings.reminderEnabled) {
-                    ReminderScheduler.reschedule(getApplication())
-                }
-                schedError = if (courses.isEmpty()) "本周暂无课程" else null
+                loadedWeek = target
+                schedError = if (hw.courses.isEmpty()) "本周暂无课程" else null
             } catch (e: Exception) {
                 schedError = e.message ?: "加载失败"
             } finally {
@@ -198,8 +215,17 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
             .format(java.util.Date())
 
-    /** 学期全量课表("全部周次"模式) */
-    fun loadScheduleFull() {
+    /** 学期全量课表("全部周次"模式);silent=true 时仅更新提醒缓存,不改变界面 */
+    fun loadScheduleFull(silent: Boolean = false) {
+        if (silent) {
+            viewModelScope.launch {
+                try {
+                    settings.cacheCourses(client.fetchCourses(schedSem))
+                    if (settings.reminderEnabled) ReminderScheduler.reschedule(getApplication())
+                } catch (_: Exception) {}
+            }
+            return
+        }
         schedLoading = true
         schedError = null
         viewModelScope.launch {
@@ -289,6 +315,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         account = ""; password = ""
         courses = emptyList(); grades = emptyList()
         xkRounds = emptyList(); selectedCourses = emptyList(); selectionLoaded = false
+        homeCache.clear(); loadedWeek = -1
         pyfa = null; pyfaError = null
         exams = emptyList(); examError = null
         loginError = null
@@ -726,6 +753,7 @@ class MainActivity : ComponentActivity() {
                                 selected = vm.schedSem,
                                 sectionTimes = vm.settings.sectionTimes,
                                 bgEnabled = showBg,
+                                weekData = { week -> vm.cachedWeek(week) },
                                 onWeekChange = { vm.loadHomeWeek(it) },
                                 onShowAll = { vm.loadScheduleFull() },
                                 onSemesterChange = { vm.schedSem = it; vm.loadScheduleFull() },

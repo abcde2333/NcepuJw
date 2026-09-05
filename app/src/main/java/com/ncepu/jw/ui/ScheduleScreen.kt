@@ -1,5 +1,11 @@
 package com.ncepu.jw.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.clickable
@@ -45,6 +51,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures as bg2
 import com.ncepu.jw.data.Course
@@ -109,6 +120,7 @@ fun ScheduleScreen(
     selected: Semester,
     sectionTimes: List<String>,
     bgEnabled: Boolean,
+    weekData: (Int) -> List<Course>?,
     onWeekChange: (Int) -> Unit,
     onShowAll: () -> Unit,
     onSemesterChange: (Semester) -> Unit,
@@ -203,7 +215,7 @@ fun ScheduleScreen(
                             onDragCancel = { acc = 0f },
                         ) { change, amount ->
                             change.consume()
-                            acc += amount
+                            acc -= amount
                             while (acc >= threshold) {
                                 if (selectedWeek < 30) onWeekChange(selectedWeek + 1)
                                 acc -= threshold
@@ -216,29 +228,39 @@ fun ScheduleScreen(
                     } else Modifier
                 ),
         ) {
-            if (loading) {
+            if (loading && courses.isEmpty()) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
-            when {
-                courses.isNotEmpty() -> CourseGrid(
-                    courses = courses,
-                    showWeeks = mode == "ALL",
-                    sectionTimes = sectionTimes,
-                    onBackground = bgEnabled,
-                )
-                loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-                error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(error ?: "", color = MaterialTheme.colorScheme.error,
-                            textAlign = TextAlign.Center, modifier = Modifier.padding(24.dp))
-                        Text("点此重试", color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.clickable { onRetry() })
+            AnimatedContent(
+                targetState = if (mode == "ALL") -1 else selectedWeek,
+                transitionSpec = {
+                    val dir = if (targetState > initialState)
+                        AnimatedContentTransitionScope.SlideDirection.Start
+                    else AnimatedContentTransitionScope.SlideDirection.End
+                    (slideIntoContainer(dir, tween(260)) + fadeIn(tween(260)))
+                        .togetherWith(slideOutOfContainer(dir, tween(240)) + fadeOut(tween(180)))
+                },
+                label = "week",
+            ) { week ->
+                val data = if (mode == "ALL") courses else weekData(week)
+                when {
+                    data != null -> CourseGrid(
+                        courses = data,
+                        showWeeks = mode == "ALL",
+                        sectionTimes = sectionTimes,
+                        onBackground = bgEnabled,
+                    )
+                    error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(error, color = MaterialTheme.colorScheme.error,
+                                textAlign = TextAlign.Center, modifier = Modifier.padding(24.dp))
+                            Text("点此重试", color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.clickable { onRetry() })
+                        }
                     }
-                }
-                else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("本学期暂无课程", color = MaterialTheme.colorScheme.outline)
+                    else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
                 }
             }
         }
