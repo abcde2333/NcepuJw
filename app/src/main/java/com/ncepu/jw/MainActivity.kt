@@ -67,6 +67,7 @@ import com.ncepu.jw.data.Course
 import com.ncepu.jw.data.Grade
 import com.ncepu.jw.data.JwClient
 import com.ncepu.jw.data.IlifeClient
+import com.ncepu.jw.data.UjingClient
 import okhttp3.OkHttpClient
 import org.json.JSONObject
 import com.ncepu.jw.data.NavBarShape
@@ -86,6 +87,8 @@ import com.ncepu.jw.ui.ScheduleScreen
 import com.ncepu.jw.ui.SelectionScreen
 import com.ncepu.jw.ui.SettingsScreen
 import com.ncepu.jw.ui.WaterScreen
+import com.ncepu.jw.ui.WasherScreen
+import com.ncepu.jw.ui.WasherUiState
 import com.ncepu.jw.ui.WaterUiState
 import com.ncepu.jw.ui.applyBackgroundBlur
 import com.ncepu.jw.ui.theme.NcepuTheme
@@ -152,6 +155,14 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var examLoading by mutableStateOf(false)
     var examError by mutableStateOf<String?>(null)
     var exams by mutableStateOf<List<com.ncepu.jw.data.Exam>>(emptyList())
+
+    // U净洗衣机
+    val ujing = UjingClient()
+    var washerState by mutableStateOf(WasherUiState())
+    var washerPhone by mutableStateOf("")
+    var washerSmsCode by mutableStateOf("")
+    private var washerToken by mutableStateOf("")
+    private val washerScanned = mutableMapOf<String, Pair<Int, String>>() // deviceId → (deviceTypeId, storeId)
 
     // 慧生活798 饮水机
     val ilife = IlifeClient()
@@ -246,6 +257,147 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 waterState = waterState.copy(loading = false, message = "加载失败:${e.message}")
             }
+        }
+    }
+
+    fun washerRequestCaptcha() {
+        washerState = washerState.copy(loading = true, message = null)
+        viewModelScope.launch {
+            val r = ujing.requestCaptcha(washerPhone.trim())
+            washerState = washerState.copy(
+                loading = false,
+                message = if (r.ok) "验证码已发送" else "发送失败:" + UjingClient.readable(r.code, r.msg),
+            )
+        }
+    }
+
+    fun doWasherLogin() {
+        washerState = washerState.copy(loading = true, message = null)
+        viewModelScope.launch {
+            val r = ujing.login(washerPhone.trim(), washerSmsCode.trim())
+            if (r.ok) {
+                washerToken = ujing.extractToken(r.json ?: org.json.JSONObject())
+                settings.washerToken = washerToken
+                washerState = washerState.copy(loggedIn = washerToken.isNotBlank(), loading = false)
+            } else {
+                washerState = washerState.copy(
+                    loading = false,
+                    message = "登录失败:" + UjingClient.readable(r.code, r.msg),
+                )
+            }
+        }
+    }
+
+    fun washerScan(qrRaw: String) {
+        if (washerToken.isBlank()) {
+            washerState = washerState.copy(message = "请先登录")
+            return
+        }
+        washerState = washerState.copy(loading = true, message = null)
+        viewModelScope.launch {
+            try {
+                val scan = ujing.scanWasher(washerToken, qrRaw)
+                if (!scan.ok) {
+                    washerState = washerState.copy(loading = false, message = "识别失败:" + UjingClient.readable(scan.code, scan.msg))
+                    return@launch
+                }
+                val result = scan.json?.optJSONObject("result") ?: org.json.JSONObject()
+                val deviceId = result.optString("deviceId", "")
+                val enabled = result.optBoolean("createOrderEnabled", false)
+                val reason = result.optString("reason", "")
+                if (!enabled) {
+                    washerState = washerState.copy(loading = false, message = "该设备不可下单:" + reason.ifBlank { "未知原因" })
+                    return@launch
+                }
+                val info = ujing.programInfo(washerToken, deviceId)
+                if (!info.ok) {
+                    washerState = washerState.copy(loading = false, message = "套餐获取失败:" + UjingClient.readable(info.code, info.msg))
+                    return@launch
+                }
+                val storeId = info.json?.optString("storeId", "") ?: ""
+                val deviceTypeId = info.json?.optInt("deviceTypeId", 0) ?: 0
+                washerScanned[deviceId] = Pair(deviceTypeId, storeId)
+                val models = UjingClient.Parsers.parseModels(info.json ?: org.json.JSONObject())
+                washerState = washerState.copy(
+                    loading = false,
+                    scannedDevice = deviceId,
+                    deviceSummary = (info.json?.optString("storeName", "") ?: "") + " " + (info.json?.optString("deviceTypeName", "") ?: ""),
+                    models = models,
+                    message = null,
+                )
+            } catch (e: Exception) {
+                washerState = washerState.copy(loading = false, message = "识别异常:" + e.message)
+            }
+        }
+    }
+
+    fun washerCreateOrder() {
+        val deviceId = washerState.scannedDevice ?: return
+        val scanned = washerScanned[deviceId]
+        if (scanned == null) {
+            washerState = washerState.copy(message = "请先识别设备")
+            return
+        }
+        val model = washerState.models.firstOrNull() ?: return
+        washerState = washerState.copy(loading = true, message = null)
+        viewModelScope.launch {
+            val r = ujing.createOrder(washerToken, deviceId, scanned.first, scanned.second, model.first, model.first)
+            if (!r.ok) {
+                washerState = washerState.copy(loading = false, message = "下单失败:" + UjingClient.readable(r.code, r.msg))
+                return@launch
+            }
+            val orderId = r.json?.optString("orderId", "") ?: ""
+            val detail = ujing.orderDetail(washerToken, orderId)
+            val order = UjingClient.Parsers.parseOrder(detail.json ?: org.json.JSONObject())
+            washerState = washerState.copy(loading = false, currentOrder = order)
+        }
+    }
+
+    fun washerPay() {
+        val order = washerState.currentOrder ?: return
+        washerState = washerState.copy(loading = true, message = null)
+        viewModelScope.launch {
+            val r = ujing.paymentArguments(washerToken, order.orderId)
+            val payInfo = r.json?.optJSONObject("payInfo")
+            val orderInfo = payInfo?.optString("orderInfo", "") ?: ""
+            if (r.ok && orderInfo.isNotBlank()) {
+                washerState = washerState.copy(loading = false, payUrl = "已生成支付宝参数")
+                openAlipay(orderInfo)
+            } else {
+                val h5 = payInfo?.optString("h5_url", "") ?: ""
+                washerState = washerState.copy(
+                    loading = false,
+                    message = if (h5.isNotBlank()) "请用浏览器打开 H5 支付链接完成支付" else "支付参数失败:" + UjingClient.readable(r.code, r.msg),
+                )
+            }
+        }
+    }
+
+    private fun openAlipay(orderInfo: String) {
+        try {
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
+            intent.data = android.net.Uri.parse("alipays://platformapi/startapp?saId=10000007&orderSuffix=" +
+                java.net.URLEncoder.encode(orderInfo, "UTF-8"))
+            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            getApplication<android.app.Application>().startActivity(intent)
+        } catch (_: Exception) {
+        }
+    }
+
+    fun washerRefresh() {
+        val order = washerState.currentOrder ?: return
+        washerState = washerState.copy(loading = true)
+        viewModelScope.launch {
+            val d = ujing.orderDetail(washerToken, order.orderId)
+            washerState = washerState.copy(loading = false, currentOrder = UjingClient.Parsers.parseOrder(d.json ?: org.json.JSONObject()))
+        }
+    }
+
+    fun washerStart() {
+        val order = washerState.currentOrder ?: return
+        viewModelScope.launch {
+            ujing.startOrder(washerToken, order.orderId)
+            washerRefresh()
         }
     }
 
@@ -671,6 +823,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpenExams = { navController.navigate("exams") },
                             onOpenWater = { navController.navigate("water") },
+                            onOpenWasher = { navController.navigate("washer") },
                             onOpenGradesNav = { navController.navigate("grades") },
                             onEvaluate = {
                                 WebViewActivity.webSession = vm.client.cookieHeader()
@@ -704,6 +857,24 @@ class MainActivity : ComponentActivity() {
                             error = vm.pyfaError,
                             data = vm.pyfa,
                             onRetry = { vm.loadPyfa() },
+                        )
+                    }
+                    composable("washer") {
+                        WasherScreen(
+                            state = vm.washerState,
+                            phone = vm.washerPhone,
+                            smsCode = vm.washerSmsCode,
+                            onPhoneChange = { vm.washerPhone = it },
+                            onSmsCodeChange = { vm.washerSmsCode = it },
+                            onSendSms = { vm.washerRequestCaptcha() },
+                            onLogin = { vm.doWasherLogin() },
+                            onScanOrInput = { vm.washerScan(it) },
+                            onSelectModel = { _, _ -> },
+                            onCreateOrder = { vm.washerCreateOrder() },
+                            onPay = { vm.washerPay() },
+                            onRefreshOrder = { vm.washerRefresh() },
+                            onStartWash = { vm.washerStart() },
+                            onBack = { navController.popBackStack() },
                         )
                     }
                     composable("water") {
@@ -874,6 +1045,7 @@ class MainActivity : ComponentActivity() {
         onOpenPyfa: () -> Unit,
         onOpenExams: () -> Unit,
         onOpenWater: () -> Unit,
+        onOpenWasher: () -> Unit,
         onOpenGradesNav: () -> Unit,
         onEvaluate: () -> Unit,
         onEnterRound: (com.ncepu.jw.data.XkRound) -> Unit,
@@ -1021,6 +1193,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenSettings = onOpenSettings,
                                 onOpenPyfa = onOpenPyfa,
                                 onOpenWater = onOpenWater,
+                                onOpenWasher = onOpenWasher,
                                 onOpenGrades = onOpenGradesNav,
                                 onLogout = {
                                     vm.settings.clearCredentials()

@@ -31,6 +31,7 @@ fun ProfileScreen(
     onOpenSettings: () -> Unit,
     onOpenPyfa: () -> Unit,
     onOpenWater: () -> Unit,
+    onOpenWasher: () -> Unit,
     onOpenGrades: () -> Unit,
     onLogout: () -> Unit,
 ) {
@@ -70,6 +71,7 @@ fun ProfileScreen(
         // 功能入口
         EntryCard("成绩查询", onOpenGrades)
         EntryCard("饮水机", onOpenWater)
+        EntryCard("U净洗衣", onOpenWasher)
         EntryCard("培养方案", onOpenPyfa)
         EntryCard("设置", onOpenSettings)
 
