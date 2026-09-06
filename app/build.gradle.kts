@@ -18,8 +18,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            // R8 混淆+压缩:material-icons-extended 全量图标/ML Kit/jxl 里未用到的类
+            // 不再进 dex,冷启动类加载和安装体积显著下降
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // 个人项目:release 直接用 debug 签名,产物可直接覆盖安装
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {
