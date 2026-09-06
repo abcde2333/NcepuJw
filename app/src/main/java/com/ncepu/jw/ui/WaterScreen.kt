@@ -159,7 +159,10 @@ fun WaterScreen(
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(Modifier.width(10.dp))
-                        Button(onClick = onSendSms, enabled = !state.loading) {
+                        Button(
+                            onClick = onSendSms,
+                            enabled = !state.loading && phone.length == 11 && captchaInput.isNotBlank(),
+                        ) {
                             Text("发送")
                         }
                     }

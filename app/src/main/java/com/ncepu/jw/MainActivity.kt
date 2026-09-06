@@ -217,20 +217,28 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         waterState = waterState.copy(loading = true, message = null)
         viewModelScope.launch {
             val r = ilife.login(waterPhone.trim(), waterSmsCode.trim())
-            if (r.ok) {
-                waterToken = ilife.extractToken(r.json ?: JSONObject())
-                settings.waterToken = waterToken
-                waterSmsCode = ""
-                waterCaptchaInput = ""
-                waterState = waterState.copy(loggedIn = true, loading = false, message = null)
-                loadWaterDevices()
-            } else {
+            if (!r.ok) {
                 refreshCaptcha()
                 waterState = waterState.copy(
                     loading = false,
                     message = "登录失败:${IlifeClient.readable(r.code, r.msg)}",
                 )
+                return@launch
             }
+            waterToken = ilife.extractToken(r.json ?: JSONObject())
+            if (waterToken.isBlank()) {
+                refreshCaptcha()
+                waterState = waterState.copy(
+                    loading = false,
+                    message = "登录返回异常:未获取到凭证,请重试",
+                )
+                return@launch
+            }
+            settings.waterToken = waterToken
+            waterSmsCode = ""
+            waterCaptchaInput = ""
+            waterState = waterState.copy(loggedIn = true, loading = false, message = null)
+            loadWaterDevices()
         }
     }
 
