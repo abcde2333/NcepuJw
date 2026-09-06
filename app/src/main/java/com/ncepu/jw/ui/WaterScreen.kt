@@ -77,6 +77,8 @@ fun WaterScreen(
     onEndDevice: (String) -> Unit,
     onAddDevice: (String, String) -> Unit,
     onRemoveDevice: (String) -> Unit,
+    onScan: () -> Unit,
+    scanResult: String? = null,
     onBack: () -> Unit,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
@@ -284,6 +286,7 @@ fun WaterScreen(
 
             if (showAddDialog) {
                 AddDeviceDialog(
+                    initialDid = scanResult,
                     onDismiss = { showAddDialog = false },
                     onConfirm = { did, name ->
                         showAddDialog = false
@@ -297,10 +300,12 @@ fun WaterScreen(
 
 @Composable
 private fun AddDeviceDialog(
+    initialDid: String? = null,
+    onScan: () -> Unit = {},
     onDismiss: () -> Unit,
     onConfirm: (String, String) -> Unit,
 ) {
-    var did by remember { mutableStateOf("") }
+    var did by remember { mutableStateOf(initialDid ?: "") }
     var name by remember { mutableStateOf("") }
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
@@ -322,12 +327,18 @@ private fun AddDeviceDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Text(
-                    "设备编号可在慧生活798 App 的设备详情或机身二维码中查看",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "设备编号可在机身二维码中查看",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onScan) { Text("扫码") }
+                }
             }
         },
         confirmButton = {

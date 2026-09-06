@@ -87,6 +87,8 @@ import com.ncepu.jw.ui.ScheduleScreen
 import com.ncepu.jw.ui.SelectionScreen
 import com.ncepu.jw.ui.SettingsScreen
 import com.ncepu.jw.ui.WaterScreen
+import com.ncepu.jw.ui.WaterScanScreen
+import com.ncepu.jw.ui.WaterDeviceIdParser
 import com.ncepu.jw.ui.WasherScreen
 import com.ncepu.jw.ui.WasherUiState
 import com.ncepu.jw.ui.WaterUiState
@@ -170,6 +172,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var waterPhone by mutableStateOf("")
     var waterSmsCode by mutableStateOf("")
     var waterCaptchaInput by mutableStateOf("")
+    var waterScanResult by mutableStateOf<String?>(null)
     private var waterToken by mutableStateOf("")
     private var waterCaptchaKey = IlifeClient.newCaptchaKey()
     var skippedLogin by mutableStateOf(false)   // 跳过教务登录(离线/仅用饮水机)
@@ -823,6 +826,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpenExams = { navController.navigate("exams") },
                             onOpenWater = { navController.navigate("water") },
+                            onOpenWaterScan = { navController.navigate("waterscan") },
                             onOpenWasher = { navController.navigate("washer") },
                             onOpenGradesNav = { navController.navigate("grades") },
                             onEvaluate = {
@@ -859,6 +863,16 @@ class MainActivity : ComponentActivity() {
                             onRetry = { vm.loadPyfa() },
                         )
                     }
+                    composable("waterscan") {
+                        WaterScanScreen(
+                            onResult = { raw ->
+                                // 从二维码内容提取 did,回填到添加对话框状态
+                                vm.waterScanResult = WaterDeviceIdParser.normalize(raw)
+                                navController.popBackStack()
+                            },
+                            onCancel = { navController.popBackStack() },
+                        )
+                    }
                     composable("washer") {
                         WasherScreen(
                             state = vm.washerState,
@@ -891,8 +905,13 @@ class MainActivity : ComponentActivity() {
                             onRefreshDevices = { vm.loadWaterDevices() },
                             onStartDevice = { vm.startWaterDevice(it) },
                             onEndDevice = { vm.endWaterDevice(it) },
-                            onAddDevice = { did, name -> vm.addWaterDevice(did, name) },
+                            onAddDevice = { did, name ->
+                                vm.addWaterDevice(did, name)
+                                vm.waterScanResult = null
+                            },
                             onRemoveDevice = { did -> vm.removeWaterDevice(did) },
+                            onScan = { navController.navigate("waterscan") },
+                            scanResult = vm.waterScanResult,
                             onBack = { navController.popBackStack() },
                         )
                     }
@@ -1045,6 +1064,7 @@ class MainActivity : ComponentActivity() {
         onOpenPyfa: () -> Unit,
         onOpenExams: () -> Unit,
         onOpenWater: () -> Unit,
+        onOpenWaterScan: () -> Unit,
         onOpenWasher: () -> Unit,
         onOpenGradesNav: () -> Unit,
         onEvaluate: () -> Unit,
@@ -1177,6 +1197,8 @@ class MainActivity : ComponentActivity() {
                                 onEndDevice = { vm.endWaterDevice(it) },
                                 onAddDevice = { did, name -> vm.addWaterDevice(did, name) },
                                 onRemoveDevice = { did -> vm.removeWaterDevice(did) },
+                                onScan = onOpenWaterScan,
+                                scanResult = vm.waterScanResult,
                                 onBack = { },
                             )
                             2 -> SelectionScreen(
