@@ -1,6 +1,7 @@
 package com.ncepu.jw.data
 
 import jxl.Workbook
+import java.util.SortedSet
 import java.io.ByteArrayInputStream
 
 /**
@@ -66,7 +67,40 @@ object ScheduleXlsParser {
         } finally {
             wb.close()
         }
-        return out
+        // 合并:同一天、同名、同节次的段(如多位教师轮流上课)→ 周次取并集、教师拼接
+        val merged = mutableListOf<Course>()
+        for ((key, list) in out.groupBy { Triple(it.day, it.name, it.sections) }) {
+            if (list.size == 1) {
+                merged += list[0]
+                continue
+            }
+            val first = list[0]
+            val weekNums = sortedSetOf<Int>()
+            list.forEach { c ->
+                Regex("""\d+""").findAll(c.weeks).forEach { m ->
+                    m.value.toIntOrNull()?.let { weekNums.add(it) }
+                }
+            }
+            val teachers = list.map { it.teacher }.filter { it.isNotBlank() }.distinct()
+                .joinToString("/")
+            merged += first.copy(weeks = formatWeeks(weekNums), teacher = teachers)
+        }
+        return merged
+    }
+
+    /** {11,12,13,14} → "11-14";{6,8,10,12} → "6,8,10,12" */
+    private fun formatWeeks(nums: SortedSet<Int>): String {
+        if (nums.isEmpty()) return ""
+        val parts = mutableListOf<String>()
+        var runStart = nums.first()
+        var prev = runStart
+        for (n in nums.drop(1)) {
+            if (n == prev + 1) { prev = n; continue }
+            parts += if (runStart == prev) "$runStart" else "$runStart-$prev"
+            runStart = n; prev = n
+        }
+        parts += if (runStart == prev) "$runStart" else "$runStart-$prev"
+        return parts.joinToString(",")
     }
 
     /** 单元格 → 段列表(每段以 [NN-NN]节 行结束) */

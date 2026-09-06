@@ -1033,6 +1033,10 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     composable("login") {
+                        // 登录成功:自动返回上一页(课表/成绩已开始加载)
+                        LaunchedEffect(vm.loggedIn) {
+                            if (vm.loggedIn) navController.popBackStack()
+                        }
                         LoginScreen(
                             account = vm.account,
                             password = vm.password,
@@ -1040,9 +1044,7 @@ class MainActivity : ComponentActivity() {
                             error = vm.loginError,
                             onAccountChange = { vm.account = it },
                             onPasswordChange = { vm.password = it },
-                            onLogin = {
-                                vm.doLogin()
-                            },
+                            onLogin = { vm.doLogin() },
                             onSkip = { navController.popBackStack() },
                         )
                     }
