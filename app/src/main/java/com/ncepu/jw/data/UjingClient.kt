@@ -131,9 +131,15 @@ class UjingClient {
 
     fun extractToken(loginJson: JSONObject): String {
         val data = loginJson.optJSONObject("data")
-        return data?.optString("token", "").orEmpty().ifBlank {
-            data?.optString("userId", "").orEmpty().let { if (it.isBlank()) "" else "" }
-        }
+        // FlandreSY:_str(data, 'token') — token 直接在 data 层
+        var t = data?.optString("token", "").orEmpty()
+        if (t.isNotBlank()) return t
+        // 兜底1:data 是字符串(服务端偶发直接回 token 字符串)
+        val dataStr = loginJson.optString("data", "")
+        if (dataStr.isNotBlank() && !dataStr.startsWith("{")) return dataStr
+        // 兜底2:整个响应顶层 token
+        t = loginJson.optString("token", "")
+        return t
     }
 
     fun extractUserId(loginJson: JSONObject): String =

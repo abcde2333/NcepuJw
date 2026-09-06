@@ -96,6 +96,11 @@ class IlifeClient {
         request("POST", "$BASE/acc/login", body)
     }
 
+    /** 验证 token 是否有效(view-info) */
+    suspend fun viewInfo(token: String): Result = withContext(Dispatchers.IO) {
+        request("GET", "$BASE/acc/view-info", null, token)
+    }
+
     /** 收藏设备列表(登录后) */
     suspend fun devices(token: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
         val r = request("GET", "$BASE/ui/app/master", null, token)

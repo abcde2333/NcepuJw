@@ -281,7 +281,11 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             if (r.ok) {
                 washerToken = ujing.extractToken(r.json ?: org.json.JSONObject())
                 settings.washerToken = washerToken
-                washerState = washerState.copy(loggedIn = washerToken.isNotBlank(), loading = false)
+                washerState = washerState.copy(
+                    loggedIn = washerToken.isNotBlank(),
+                    loading = false,
+                    savedWashers = settings.washerDevices,
+                )
             } else {
                 washerState = washerState.copy(
                     loading = false,
@@ -320,6 +324,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 val storeId = info.json?.optString("storeId", "") ?: ""
                 val deviceTypeId = info.json?.optInt("deviceTypeId", 0) ?: 0
                 washerScanned[deviceId] = Pair(deviceTypeId, storeId)
+                // 记住这台设备(下次免扫码)
+                settings.addWasherDevice(deviceId, info.json?.optString("deviceNo", "") ?: "")
+                washerState = washerState.copy(savedWashers = settings.washerDevices)
                 val models = UjingClient.Parsers.parseModels(info.json ?: org.json.JSONObject())
                 washerState = washerState.copy(
                     loading = false,
@@ -402,6 +409,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             ujing.startOrder(washerToken, order.orderId)
             washerRefresh()
         }
+    }
+
+    fun refreshWasherSaved() {
+        washerState = washerState.copy(savedWashers = settings.washerDevices)
     }
 
     fun startWaterDevice(did: String) {
@@ -888,6 +899,12 @@ class MainActivity : ComponentActivity() {
                     composable("washer") {
                         WasherScreen(
                             state = vm.washerState,
+                            onRemoveWasher = { did ->
+                                vm.settings.removeWasherDevice(did)
+                                vm.washerState = vm.washerState.copy(
+                                    savedWashers = vm.settings.washerDevices,
+                                )
+                            },
                             phone = vm.washerPhone,
                             smsCode = vm.washerSmsCode,
                             onPhoneChange = { vm.washerPhone = it },

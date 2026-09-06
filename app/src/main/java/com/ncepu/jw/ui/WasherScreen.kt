@@ -53,6 +53,7 @@ data class WasherUiState(
     val models: List<Triple<Int, String, String>> = emptyList(), // id, 名称, 价格
     val currentOrder: WasherOrderInfo? = null,
     val payUrl: String = "",                 // 支付宝收银台参数(orderInfo),展示给用户跳转
+    val savedWashers: List<Pair<String, String>> = emptyList(), // 已保存洗衣机(did, deviceNo)
 )
 
 /** 洗衣页:登录 → 扫码/输设备号 → 选套餐下单 → 支付 → 启动/状态 */
@@ -72,6 +73,7 @@ fun WasherScreen(
     onPay: () -> Unit,
     onRefreshOrder: () -> Unit,
     onStartWash: () -> Unit,
+    onRemoveWasher: (String) -> Unit = {},
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -156,6 +158,39 @@ fun WasherScreen(
                                         color = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.padding(top = 6.dp),
                                     )
+                                }
+                            }
+                        }
+                    }
+                    // 已保存的洗衣机(点选即用)
+                    if (state.savedWashers.isNotEmpty()) {
+                        item {
+                            Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                                Column(Modifier.padding(12.dp)) {
+                                    Text("我的洗衣机", fontWeight = FontWeight.Bold)
+                                    Spacer(Modifier.height(4.dp))
+                                    state.savedWashers.forEach { (did, name) ->
+                                        Row(
+                                            Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text(
+                                                name.ifBlank { did },
+                                                Modifier.weight(1f).clickable { onScanOrInput(did) },
+                                                color = if (did == state.scannedDevice)
+                                                    MaterialTheme.colorScheme.primary
+                                                else MaterialTheme.colorScheme.onSurface,
+                                            )
+                                            Text(
+                                                "删除",
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier
+                                                    .clickable { onRemoveWasher(did) }
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

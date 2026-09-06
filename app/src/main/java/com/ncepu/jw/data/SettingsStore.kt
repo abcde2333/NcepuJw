@@ -45,6 +45,7 @@ class SettingsStore(context: Context) {
         const val KEY_WATER_TOKEN = "water_token"
         const val KEY_WATER_DEVICES = "water_devices"
         const val KEY_WASHER_TOKEN = "washer_token"
+        const val KEY_WASHER_DEVICES = "washer_devices"
         const val KEY_EXAM_CACHE = "exam_cache"
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
@@ -183,6 +184,36 @@ class SettingsStore(context: Context) {
     var washerToken: String
         get() = prefs.getString(KEY_WASHER_TOKEN, null) ?: ""
         set(v) = prefs.edit().putString(KEY_WASHER_TOKEN, v).apply()
+
+    /** 扫过码的洗衣机(did → deviceNo) */
+    var washerDevices: List<Pair<String, String>>
+        get() {
+            val raw = prefs.getString(KEY_WASHER_DEVICES, null) ?: return emptyList()
+            return runCatching {
+                val arr = org.json.JSONArray(raw)
+                (0 until arr.length()).mapNotNull { i ->
+                    val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                    o.optString("did") to o.optString("name")
+                }
+            }.getOrDefault(emptyList())
+        }
+        set(v) {
+            val arr = org.json.JSONArray()
+            v.forEach { (did, name) ->
+                arr.put(org.json.JSONObject().put("did", did).put("name", name))
+            }
+            prefs.edit().putString(KEY_WASHER_DEVICES, arr.toString()).apply()
+        }
+
+    fun addWasherDevice(did: String, name: String) {
+        val list = washerDevices.filter { it.first != did }.toMutableList()
+        list.add(did to name)
+        washerDevices = list
+    }
+
+    fun removeWasherDevice(did: String) {
+        washerDevices = washerDevices.filter { it.first != did }
+    }
 
     /** 手动添加的饮水设备(did → 名称),存 JSON */
     var waterDevices: List<Pair<String, String>>
