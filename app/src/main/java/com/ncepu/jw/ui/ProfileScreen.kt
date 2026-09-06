@@ -28,6 +28,8 @@ import androidx.compose.ui.unit.dp
 fun ProfileScreen(
     account: String,
     name: String?,
+    loggedIn: Boolean = true,
+    onOpenJwxtLogin: () -> Unit = {},
     onOpenSettings: () -> Unit,
     onOpenPyfa: () -> Unit,
     onOpenWater: () -> Unit,
@@ -69,7 +71,11 @@ fun ProfileScreen(
         }
 
         // 功能入口
-        EntryCard("成绩查询", onOpenGrades)
+        if (loggedIn) {
+            EntryCard("成绩查询", onOpenGrades)
+        } else {
+            EntryCard("登录教务系统", onOpenJwxtLogin)
+        }
         EntryCard("饮水机", onOpenWater)
         EntryCard("U净洗衣", onOpenWasher)
         EntryCard("培养方案", onOpenPyfa)
@@ -77,17 +83,19 @@ fun ProfileScreen(
 
         InfoRow(Icons.Filled.Info, "数据来源", "华北电力大学教务系统(强智 R4.5)\njwxt.ncepu.edu.cn")
 
-        Button(
-            onClick = onLogout,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.errorContainer,
-                contentColor = MaterialTheme.colorScheme.onErrorContainer,
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-        ) {
-            Text("退出登录")
+        if (loggedIn) {
+            Button(
+                onClick = onLogout,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+            ) {
+                Text("退出登录")
+            }
         }
 
         Text(

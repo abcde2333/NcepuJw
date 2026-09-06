@@ -11,14 +11,12 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * 慧生活798 客户端(逆向自 ilife798 App 的 uni-app 接口,
- * 协议参考 nocookies111/life-798 与 KynixInHK/anti-ad-ilife-798)。
+ * 慧生活798 客户端(协议对齐 nocookies111/life-798 的 IlifeApi.java)。
  *
- * 认证:手机号 + 图形验证码 → 短信验证码 → token(ApplicationType=1,1 为设备控制平台)
- * 设备:GET /ui/app/master → data.favos[] = 收藏设备(id/name)
- * 开水:GET /dev/start?did=<id>&upgrade=true&ptype=91&rcp=false
- * 关水:GET /dev/end?did=<id>
- * 所有请求需带头:ApplicationType: 1,1 与 Authorization: <token>
+ * 双平台 ApplicationType(严格对齐参考实现):
+ *  - "1,1" 设备控制平台:登录 → appToken;用于 /ui/app/master、/dev/start|end
+ *  - "1,5" 账户服务平台:发短信 /acc/login/code 用它(life-798 的 post() 默认值)
+ * 响应结构:登录 token 位于 data.al.token;uid 位于 data.al.uid / view-info 的 data.id
  */
 class IlifeClient {
 
@@ -26,12 +24,13 @@ class IlifeClient {
         const val BASE = "https://i.ilife798.com/api/v1"
         private const val UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) " +
             "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Html5Plus/1.0 (Immersed/20) uni-app"
-        private const val APP_TYPE = "1,1"
+        const val APP_TYPE_MAIN = "1,5"   // 账户服务
+        const val APP_TYPE_APP = "1,1"    // 设备控制
 
-        /** 生成图形验证码的 s 参数(随机串) */
+        /** 生成图形验证码的 s 参数(life-798 为 10 位随机串) */
         fun newCaptchaKey(): String {
             val chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-            return (1..16).map { chars.random() }.joinToString("")
+            return (1..10).map { chars.random() }.joinToString("")
         }
 
         /** 错误码 → 用户可读消息 */
@@ -59,10 +58,16 @@ class IlifeClient {
         val ok: Boolean get() = code == 0
     }
 
-    private fun request(method: String, url: String, bodyJson: JSONObject? = null, token: String? = null): Result {
+    private fun request(
+        method: String,
+        url: String,
+        bodyJson: JSONObject? = null,
+        token: String? = null,
+        appType: String = APP_TYPE_MAIN,
+    ): Result {
         val builder = Request.Builder().url(url)
             .header("User-Agent", UA)
-            .header("ApplicationType", APP_TYPE)
+            .header("ApplicationType", appType)
             .header("Accept-Language", "zh-Hans-CN;q=1")
         if (!token.isNullOrBlank()) builder.header("Authorization", token)
         val mediaType = "application/json; charset=utf-8".toMediaType()
@@ -83,27 +88,27 @@ class IlifeClient {
     /** 图形验证码图片地址(展示给用户输入) */
     fun captchaUrl(s: String): String = "$BASE/captcha/?s=${java.net.URLEncoder.encode(s, "UTF-8")}&r=${System.currentTimeMillis()}"
 
-    /** 发送短信验证码 */
+    /** 发送短信验证码(life-798:post() 默认 ApplicationType=1,5) */
     suspend fun sendSms(phone: String, captchaInput: String, s: String): Result =
         withContext(Dispatchers.IO) {
             val body = JSONObject().put("un", phone).put("authCode", captchaInput).put("s", s)
-            request("POST", "$BASE/acc/login/code", body)
+            request("POST", "$BASE/acc/login/code", body, appType = APP_TYPE_MAIN)
         }
 
-    /** 短信验证码登录,返回 token(设备控制平台) */
+    /** 短信验证码登录(设备控制平台,ApplicationType=1,1),token 在 data.al.token */
     suspend fun login(phone: String, smsCode: String): Result = withContext(Dispatchers.IO) {
         val body = JSONObject().put("openCode", "").put("un", phone).put("authCode", smsCode).put("cid", "")
-        request("POST", "$BASE/acc/login", body)
+        request("POST", "$BASE/acc/login", body, appType = APP_TYPE_APP)
     }
 
     /** 验证 token 是否有效(view-info) */
     suspend fun viewInfo(token: String): Result = withContext(Dispatchers.IO) {
-        request("GET", "$BASE/acc/view-info", null, token)
+        request("GET", "$BASE/acc/view-info", null, token, appType = APP_TYPE_MAIN)
     }
 
-    /** 收藏设备列表(登录后) */
+    /** 收藏设备列表(设备控制 token) */
     suspend fun devices(token: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
-        val r = request("GET", "$BASE/ui/app/master", null, token)
+        val r = request("GET", "$BASE/ui/app/master", null, token, appType = APP_TYPE_APP)
         val favos = r.json?.optJSONObject("data")?.optJSONArray("favos") ?: return@withContext emptyList()
         val out = mutableListOf<Pair<String, String>>()
         for (i in 0 until favos.length()) {
@@ -116,12 +121,12 @@ class IlifeClient {
 
     /** 启动饮水机 */
     suspend fun start(token: String, did: String): Result = withContext(Dispatchers.IO) {
-        request("GET", "$BASE/dev/start?did=$did&upgrade=true&ptype=91&rcp=false", null, token)
+        request("GET", "$BASE/dev/start?did=$did&upgrade=true&ptype=91&rcp=false", null, token, appType = APP_TYPE_APP)
     }
 
     /** 结束出水 */
     suspend fun end(token: String, did: String): Result = withContext(Dispatchers.IO) {
-        request("GET", "$BASE/dev/end?did=$did", null, token)
+        request("GET", "$BASE/dev/end?did=$did", null, token, appType = APP_TYPE_APP)
     }
 
     /** 从登录响应 JSON 提取 token 与 uid/eid(data.al.token) */

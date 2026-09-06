@@ -70,6 +70,7 @@ fun WaterScreen(
     onPhoneChange: (String) -> Unit,
     onSmsCodeChange: (String) -> Unit,
     onCaptchaInputChange: (String) -> Unit,
+    onRefreshCaptcha: () -> Unit,
     onSendSms: () -> Unit,
     onLogin: () -> Unit,
     onRefreshDevices: () -> Unit,
@@ -128,7 +129,7 @@ fun WaterScreen(
                             Modifier
                                 .width(110.dp)
                                 .height(52.dp)
-                                .clickable { onSendSms() },
+                                .clickable { onRefreshCaptcha() },
                             contentAlignment = Alignment.Center,
                         ) {
                             val bmp = state.captchaBmp

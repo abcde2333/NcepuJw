@@ -635,15 +635,15 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 }
 
-/** 跳过教务登录后的提示页 */
+/** 未登录提示(课表/成绩页) */
 @Composable
-private fun SkippedNotice(onGoLogin: () -> Unit) {
+private fun LoginRequired(onGoLogin: () -> Unit) {
     Column(
         Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
     ) {
-        Text("已跳过教务登录", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text("未登录教务系统", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Spacer(Modifier.padding(8.dp))
         Text(
             "课表、成绩等教务功能需要登录后使用\n饮水机功能可在底部“饮水”标签直接使用\n如校外使用教务，请先连接 EasyConnect",
@@ -657,10 +657,6 @@ private fun SkippedNotice(onGoLogin: () -> Unit) {
             Text("去登录教务系统")
         }
     }
-}
-
-object NcepuAppHolder {
-    var requestLogin by mutableStateOf(false)
 }
 
 class MainActivity : ComponentActivity() {
@@ -749,14 +745,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // "去登录教务系统":清除跳过标记,回到登录页
-        LaunchedEffect(NcepuAppHolder.requestLogin) {
-            if (NcepuAppHolder.requestLogin) {
-                NcepuAppHolder.requestLogin = false
-                vm.skippedLogin = false
-            }
-        }
-
         val notifPermLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission(),
         ) { ReminderScheduler.reschedule(ctx) }
@@ -792,40 +780,17 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        AnimatedContent(
-            targetState = vm.loggedIn,
-            transitionSpec = {
-                (fadeIn(tween(350)) + androidx.compose.animation.scaleIn(
-                    initialScale = 0.92f, animationSpec = tween(350)))
-                    .togetherWith(fadeOut(tween(250)))
+        // 教务登录改为"我的"中的入口路由;主界面始终可达(饮水机不依赖教务登录)
+        NavHost(
+            navController = navController,
+            startDestination = "main",
+            enterTransition = {
+                slideIntoContainer(
+                    AnimatedContentTransitionScope.SlideDirection.Start,
+                    animationSpec = tween(320),
+                    initialOffset = { it / 6 },
+                ) + fadeIn(tween(320))
             },
-            label = "root",
-        ) { logged ->
-            if (!logged) {
-                LoginScreen(
-                    account = vm.account,
-                    password = vm.password,
-                    loading = vm.loginLoading,
-                    error = vm.loginError,
-                    onAccountChange = { vm.account = it },
-                    onPasswordChange = { vm.password = it },
-                    onLogin = { vm.doLogin() },
-                    onSkip = {
-                        vm.skippedLogin = true
-                        vm.loadWaterDevices()
-                    },
-                )
-            } else {
-                NavHost(
-                    navController = navController,
-                    startDestination = "main",
-                    enterTransition = {
-                        slideIntoContainer(
-                            AnimatedContentTransitionScope.SlideDirection.Start,
-                            animationSpec = tween(320),
-                            initialOffset = { it / 6 },
-                        ) + fadeIn(tween(320))
-                    },
                     exitTransition = { fadeOut(tween(220)) },
                     popEnterTransition = { fadeIn(tween(220)) },
                     popExitTransition = {
@@ -851,7 +816,14 @@ class MainActivity : ComponentActivity() {
                             onOpenWater = { navController.navigate("water") },
                             onOpenWaterScan = { navController.navigate("waterscan") },
                             onOpenWasher = { navController.navigate("washer") },
-                            onOpenGradesNav = { navController.navigate("grades") },
+                            onOpenJwxtLogin = { navController.navigate("login") },
+                            onOpenGradesNav = {
+                                if (!vm.loggedIn) navController.navigate("login")
+                                else {
+                                    if (vm.grades.isEmpty()) vm.loadGrades()
+                                    navController.navigate("grades")
+                                }
+                            },
                             onEvaluate = {
                                 WebViewActivity.webSession = vm.client.cookieHeader()
                                 evalLauncher.launch(
@@ -929,6 +901,7 @@ class MainActivity : ComponentActivity() {
                             onPhoneChange = { vm.waterPhone = it },
                             onSmsCodeChange = { vm.waterSmsCode = it },
                             onCaptchaInputChange = { vm.waterCaptchaInput = it },
+                            onRefreshCaptcha = { vm.refreshCaptcha() },
                             onSendSms = { vm.sendWaterSms() },
                             onLogin = { vm.doWaterLogin() },
                             onRefreshDevices = { vm.loadWaterDevices() },
@@ -1060,9 +1033,21 @@ class MainActivity : ComponentActivity() {
                             onBack = { navController.popBackStack() },
                         )
                     }
+                    composable("login") {
+                        LoginScreen(
+                            account = vm.account,
+                            password = vm.password,
+                            loading = vm.loginLoading,
+                            error = vm.loginError,
+                            onAccountChange = { vm.account = it },
+                            onPasswordChange = { vm.password = it },
+                            onLogin = {
+                                vm.doLogin()
+                            },
+                            onSkip = { navController.popBackStack() },
+                        )
+                    }
                 }
-            }
-        }
     }
 
     private fun isExactAlarmGranted(ctx: Context): Boolean {
@@ -1095,6 +1080,7 @@ class MainActivity : ComponentActivity() {
         onOpenWater: () -> Unit,
         onOpenWaterScan: () -> Unit,
         onOpenWasher: () -> Unit,
+        onOpenJwxtLogin: () -> Unit,
         onOpenGradesNav: () -> Unit,
         onEvaluate: () -> Unit,
         onEnterRound: (com.ncepu.jw.data.XkRound) -> Unit,
@@ -1190,7 +1176,7 @@ class MainActivity : ComponentActivity() {
                         label = "tab",
                     ) { t ->
                         when (t) {
-                            0 -> if (vm.skippedLogin) SkippedNotice(onGoLogin = { NcepuAppHolder.requestLogin = true }) else ScheduleScreen(
+                            0 -> if (!vm.loggedIn) LoginRequired(onGoLogin = onOpenJwxtLogin) else ScheduleScreen(
                                 loading = vm.schedLoading,
                                 error = vm.schedError,
                                 courses = vm.courses,
@@ -1219,6 +1205,7 @@ class MainActivity : ComponentActivity() {
                                 onPhoneChange = { vm.waterPhone = it },
                                 onSmsCodeChange = { vm.waterSmsCode = it },
                                 onCaptchaInputChange = { vm.waterCaptchaInput = it },
+                                onRefreshCaptcha = { vm.refreshCaptcha() },
                                 onSendSms = { vm.sendWaterSms() },
                                 onLogin = { vm.doWaterLogin() },
                                 onRefreshDevices = { vm.loadWaterDevices() },
@@ -1241,6 +1228,8 @@ class MainActivity : ComponentActivity() {
                             else -> ProfileScreen(
                                 account = vm.account,
                                 name = vm.name,
+                                loggedIn = vm.loggedIn,
+                                onOpenJwxtLogin = onOpenJwxtLogin,
                                 onOpenSettings = onOpenSettings,
                                 onOpenPyfa = onOpenPyfa,
                                 onOpenWater = onOpenWater,
