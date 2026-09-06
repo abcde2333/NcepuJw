@@ -236,10 +236,31 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     fun loadWaterDevices() {
         if (waterToken.isBlank()) waterToken = settings.waterToken
-        if (waterToken.isBlank()) return
+        if (waterToken.isBlank()) {
+            waterState = waterState.copy(loggedIn = false)
+            refreshCaptcha()
+            return
+        }
         waterState = waterState.copy(loggedIn = true, loading = true, message = null)
         viewModelScope.launch {
             try {
+                // 账号状态刷新:view-info 验证 token(设备平台 1,1)
+                val check = ilife.viewInfo(waterToken)
+                if (!check.ok) {
+                    settings.waterToken = ""
+                    waterToken = ""
+                    waterState = waterState.copy(
+                        loggedIn = false,
+                        loading = false,
+                        devices = emptyList(),
+                        message = "登录已过期,请重新登录",
+                    )
+                    refreshCaptcha()
+                    return@launch
+                }
+                val accountName = check.json?.optJSONObject("data")?.let { d ->
+                    d.optString("name", "").ifBlank { d.optString("nickName", "").ifBlank { d.optString("id", "") } }
+                }
                 val remote = try { ilife.devices(waterToken) } catch (_: Exception) { emptyList() }
                 // 合并手动添加的设备(不覆盖远程)
                 val manual = settings.waterDevices.filter { m -> remote.none { it.first == m.first } }
@@ -254,7 +275,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 waterState = waterState.copy(
                     devices = merged,
                     loading = false,
-                    message = if (merged.isEmpty()) "暂无设备,可手动添加" else null,
+                    message = if (merged.isEmpty()) {
+                        accountName?.let { "已登录:$accountName · 暂无设备,可手动添加" } ?: "暂无设备,可手动添加"
+                    } else null,
                 )
             } catch (e: Exception) {
                 waterState = waterState.copy(loading = false, message = "加载失败:${e.message}")

@@ -101,9 +101,9 @@ class IlifeClient {
         request("POST", "$BASE/acc/login", body, appType = APP_TYPE_APP)
     }
 
-    /** 验证 token 是否有效(view-info) */
+    /** 验证 token 是否有效(view-info):设备 token 必须配 1,1 头,否则被误判过期 */
     suspend fun viewInfo(token: String): Result = withContext(Dispatchers.IO) {
-        request("GET", "$BASE/acc/view-info", null, token, appType = APP_TYPE_MAIN)
+        request("GET", "$BASE/acc/view-info", null, token, appType = APP_TYPE_APP)
     }
 
     /** 收藏设备列表(设备控制 token) */
