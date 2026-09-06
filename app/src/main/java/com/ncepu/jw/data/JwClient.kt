@@ -158,7 +158,7 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
             ?.takeIf { !it.matches(Regex("""(?:$NAME_BLACKLIST)""")) }
     } catch (_: Exception) { null }
 
-    /** 查询课表(周视图),失败抛 JwException */
+    /** 查询整学期课表(全量,含各课周次串) */
     suspend fun fetchCourses(sem: Semester): List<Course> = withContext(Dispatchers.IO) {
         val html = get("/jsxsd/xskb/xskb_list.do?xnxq01id=${sem.key}").use { r ->
             val body = r.body?.string().orEmpty()
@@ -167,6 +167,38 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
             body
         }
         parseScheduleHtml(html)
+    }
+
+    /**
+     * 按周查询课表(服务端过滤,零误差;对齐 YiQiuYes/schedule 的 zc 参数用法)。
+     * 带 zc + kbjcmsid 参数时,强智服务端只返回该周的课。
+     */
+    suspend fun fetchCoursesByWeek(sem: Semester, week: Int): List<Course> = withContext(Dispatchers.IO) {
+        val html = postForm(
+            "/jsxsd/xskb/xskb_list.do",
+            mapOf(
+                "xnxq01id" to sem.key,
+                "zc" to week.toString(),
+                "viweType" to "0",
+                "showallprint" to "0",
+                "showkchprint" to "0",
+                "showkink" to "0",
+                "showfzmprint" to "0",
+                "baseUrl" to "/jsxsd",
+                "kbjcmsid" to KB_JCM_SID,
+            ),
+            "$baseUrl/jsxsd/framework/xsMain.jsp",
+        ).use { r ->
+            val body = r.body?.string().orEmpty()
+            if (isSessionLost(body)) throw JwException("会话已失效,请重新登录")
+            body
+        }
+        // 按周接口可能返回新版 qz-weeklyTable 或旧版 kbtable,两种都兼容
+        val weekly = parseWeeklyTableHtml(html)
+        if (weekly.isNotEmpty()) return@withContext weekly
+        val courses = parseScheduleHtml(html)
+        // 周次由服务端过滤后,给每条课打上周标记
+        courses.map { it.copy(weeks = "第${week}周") }
     }
 
     /** 查询成绩(全部学期),调用方按 Grade.term 过滤 */
@@ -195,6 +227,8 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
     /** 剥离 HTML 注释(教务页面里常有注释掉的 td/a,会干扰索引解析) */
     private fun stripComments(html: String): String =
         html.replace(Regex("<!--.*?-->", RegexOption.DOT_MATCHES_ALL), "")
+
+    private val KB_JCM_SID = "94D51EECEBF4F9B4E053474110AC8060"
 
     private val TD_RE = Regex("""<td[^>]*>([\s\S]*?)</td>""", RegexOption.IGNORE_CASE)
     private val TH_RE = Regex("""<th[^>]*>([\s\S]*?)</th>""", RegexOption.IGNORE_CASE)
@@ -630,6 +664,71 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
         }
         return PyfaData(major, grade, goals, requirements, core, courses)
     }
+    /**
+     * 解析新版周课表(qz-weeklyTable-td qz-hasCourse 格子)。
+     * 格子 DOM 顺序 = 行 x 7 列;课程信息在 qz-tooltipContent-title / detailitem。
+     */
+    internal fun parseWeeklyTableHtml(html: String): List<Course> {
+        val cleaned = stripComments(html)
+        if (!cleaned.contains("qz-weeklyTable")) return emptyList()
+        val out = mutableListOf<Course>()
+        val cellRe = Regex(
+            """<td[^>]*class="qz-weeklyTable-td\s+qz-hasCourse\s*"[^>]*>([\s\S]*?)</td>""",
+            RegexOption.IGNORE_CASE,
+        )
+        val titleRe = Regex(
+            """<div[^>]*class="[^"]*qz-tooltipContent-title[^"]*"[^>]*>([\s\S]*?)</div>""",
+            RegexOption.IGNORE_CASE,
+        )
+        val detailRe = Regex(
+            """<div[^>]*class="[^"]*qz-tooltipContent-detailitem[^"]*"[^>]*>([\s\S]*?)</div>""",
+            RegexOption.IGNORE_CASE,
+        )
+        val secRe = Regex("""\[(\d+)(?:-(\d+))?节]""")
+        val roomRe = Regex("""\(([^)]+)\)""")
+
+        var cellIndex = -1
+        for (cell in cellRe.findAll(cleaned)) {
+            cellIndex++
+            val day = cellIndex % 7 + 1
+            val big = cellIndex / 7 + 1
+            val sections = (big * 2 - 1)..(big * 2)
+            val cellHtml = cell.groupValues[1]
+
+            val titles = titleRe.findAll(cellHtml).map { it.groupValues[1] }.toList()
+            val details = detailRe.findAll(cellHtml).map { it.groupValues[1] }.toList()
+            if (titles.isEmpty()) continue
+
+            for (j in titles.indices) {
+                val name = cellLines(titles[j]).joinToString(" ").trim()
+                if (name.isEmpty()) continue
+                val timeStr = details.getOrNull(5 + j * 11)?.let { cellLines(it).joinToString(" ") } ?: ""
+                val secM = secRe.find(timeStr)
+                val realSections = secM?.let {
+                    val a = it.groupValues[1].toIntOrNull() ?: sections.first
+                    val b = it.groupValues[2]?.toIntOrNull() ?: a
+                    a..b
+                } ?: sections
+                var room = details.getOrNull(7 + j * 11)?.let { roomRe.find(it)?.groupValues?.get(1) } ?: ""
+                if (room.isBlank()) {
+                    room = details.firstOrNull { it.contains("上课地点") }
+                        ?.let { it.substringAfter("上课地点：").substringAfter("上课地点:").trim() } ?: ""
+                    room = room.replace(Regex("""['"<br/]*$"""), "").trim()
+                }
+                out += Course(
+                    name = name,
+                    day = day,
+                    sections = realSections,
+                    weeks = "",
+                    teacher = "",
+                    room = room,
+                    credit = "",
+                )
+            }
+        }
+        return out
+    }
+
 }
 
 class JwException(message: String) : Exception(message)

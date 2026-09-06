@@ -477,12 +477,24 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         schedError = null
         viewModelScope.launch {
             try {
-                val hw = client.fetchHomeWeek(weekRqText(target))
-                if (hw.week > 0) officialWeek = hw.week
-                homeCache[target] = hw.courses
-                courses = hw.courses
+                var fetched: List<Course>? = null
+                var weekNo = 0
+                try {
+                    // 优先走 xskb_list.do + zc 参数(服务端按周过滤,同 YiQiu v2)
+                    val byWeek = client.fetchCoursesByWeek(schedSem, target)
+                    fetched = byWeek
+                    weekNo = target
+                } catch (_: Exception) {
+                    // 回退:首页周课表接口
+                    val hw = client.fetchHomeWeek(weekRqText(target))
+                    fetched = hw.courses
+                    weekNo = hw.week
+                }
+                if (weekNo > 0) officialWeek = weekNo
+                homeCache[target] = fetched
+                courses = fetched
                 loadedWeek = target
-                schedError = if (hw.courses.isEmpty()) "本周暂无课程" else null
+                schedError = if (fetched.isEmpty()) "本周暂无课程" else null
             } catch (e: Exception) {
                 schedError = e.message ?: "加载失败"
             } finally {
