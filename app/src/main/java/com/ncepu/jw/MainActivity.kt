@@ -491,27 +491,47 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         )
     }
 
-    fun startWaterDevice(did: String) {
-        viewModelScope.launch {
-            val r = ilife.start(waterToken, did)
-            waterState = waterState.copy(
-                message = if (r.ok) "设备已启动,请接水" else "启动失败:${IlifeClient.readable(r.code, r.msg)}",
-                devices = waterState.devices.map {
-                    if (it.first == did) Triple(it.first, it.second, r.ok) else it
-                },
-            )
-        }
-    }
+    /** 每台设备在途的操作(防连点竞态:迟到的 start 响应不得覆盖之后的 end) */
+    private val waterOps = mutableMapOf<String, kotlinx.coroutines.Job>()
 
-    fun endWaterDevice(did: String) {
-        viewModelScope.launch {
-            val r = ilife.end(waterToken, did)
-            waterState = waterState.copy(
-                message = if (r.ok) "已结束出水" else "结束失败:${IlifeClient.readable(r.code, r.msg)}",
-                devices = waterState.devices.map {
-                    if (it.first == did) Triple(it.first, it.second, false) else it
-                },
-            )
+    fun startWaterDevice(did: String) = toggleWaterDevice(did, start = true)
+
+    fun endWaterDevice(did: String) = toggleWaterDevice(did, start = false)
+
+    private fun toggleWaterDevice(did: String, start: Boolean) {
+        if (waterOps[did]?.isActive == true) return
+        // 乐观更新:点击立即切换显示,失败再回滚
+        waterState = waterState.copy(
+            loading = true,
+            message = null,
+            devices = waterState.devices.map {
+                if (it.first == did) Triple(it.first, it.second, start) else it
+            },
+        )
+        waterOps[did] = viewModelScope.launch {
+            try {
+                val r = if (start) ilife.start(waterToken, did) else ilife.end(waterToken, did)
+                val verb = if (start) "启动" else "结束"
+                waterState = waterState.copy(
+                    loading = false,
+                    message = if (r.ok) {
+                        if (start) "设备已启动,请接水" else "已结束出水"
+                    } else "$verb 失败:${IlifeClient.readable(r.code, r.msg)}",
+                    devices = waterState.devices.map {
+                        if (it.first == did) Triple(it.first, it.second, if (r.ok) start else !start) else it
+                    },
+                )
+            } catch (e: Exception) {
+                waterState = waterState.copy(
+                    loading = false,
+                    message = "${if (start) "启动" else "结束"}异常:${e.message}",
+                    devices = waterState.devices.map {
+                        if (it.first == did) Triple(it.first, it.second, !start) else it
+                    },
+                )
+            } finally {
+                waterOps.remove(did)
+            }
         }
     }
 
