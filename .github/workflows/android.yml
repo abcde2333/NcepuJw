@@ -1,6 +1,6 @@
 name: Android CI
 
-# 推送到 main / PR / 手动触发时构建 Debug APK;打 v* 标签时额外发布 Release
+# 推送到 main / PR / 手动触发时构建 R8 压缩版 APK;打 v* 标签时额外发布 Release
 on:
   push:
     branches: [ main ]
@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    name: Build debug APK
+    name: Build release APK (R8)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,14 +33,15 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.2" \
             || echo "::warning::sdkmanager 安装 android-37.2 失败,转由 AGP 自动安装"
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Build release APK (R8)
+        run: ./gradlew assembleRelease --stacktrace
 
+      # release 用 debug 签名,产物可直接覆盖安装
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NcepuJw-debug-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: NcepuJw-APK
+          path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
   release:
@@ -54,11 +55,11 @@ jobs:
       - name: Download built APK
         uses: actions/download-artifact@v4
         with:
-          name: NcepuJw-debug-APK
+          name: NcepuJw-APK
           path: apk
 
       - name: Rename APK with tag
-        run: mv apk/app-debug.apk "apk/NcepuJw-${GITHUB_REF_NAME}.apk"
+        run: mv apk/app-release.apk "apk/NcepuJw-${GITHUB_REF_NAME}.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
