@@ -66,6 +66,7 @@ import androidx.navigation.compose.rememberNavController
 import com.ncepu.jw.data.Course
 import com.ncepu.jw.data.Grade
 import com.ncepu.jw.data.JwClient
+import com.ncepu.jw.data.JwException
 import com.ncepu.jw.data.IlifeClient
 import com.ncepu.jw.data.UjingClient
 import okhttp3.OkHttpClient
@@ -556,12 +557,20 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         schedError = null
         viewModelScope.launch {
             try {
-                // 主源:XLS 导出(格式规整);失败回退 HTML 页解析
-                val full = try {
-                    client.fetchScheduleXls(schedSem) ?: client.fetchCourses(schedSem)
-                } catch (e: Exception) {
-                    client.fetchCourses(schedSem)
+                // 双源:XLS 导出(格式规整)+ 课表页 HTML 解析。
+                // 任一源都可能残缺(实测服务器 HTML 曾只剩周一二),取星期覆盖更全的一份;
+                // 两者都失败时抛出真实的错误(会话失效/评教拦截等)
+                val xls = try { client.fetchScheduleXls(schedSem) } catch (_: Exception) { null }
+                var htmlErr: Exception? = null
+                val html = try { client.fetchCourses(schedSem) } catch (e: Exception) { htmlErr = e; null }
+                val xlsClean = xls?.takeIf { it.isNotEmpty() }
+                val htmlClean = html?.takeIf { it.isNotEmpty() }
+                if (xlsClean == null && htmlClean == null) {
+                    throw htmlErr ?: JwException("课表获取失败,请稍后重试")
                 }
+                val xlsDays = xlsClean?.map { it.day }?.distinct()?.size ?: 0
+                val htmlDays = htmlClean?.map { it.day }?.distinct()?.size ?: 0
+                val full = if (htmlDays > xlsDays) htmlClean!! else xlsClean ?: htmlClean!!
                 allCourses = full
                 courses = full
                 schedLoaded = true

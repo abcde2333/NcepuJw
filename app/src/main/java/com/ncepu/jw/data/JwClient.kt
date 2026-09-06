@@ -171,27 +171,35 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
 
     /**
      * 课表 XLS 导出(xskb_print.do,学生个人课表)。
-     * 数据与网页一致但格式规整,解析失败返回 null(调用方回退 HTML)。
+     * 数据与网页一致但格式规整。任何失败(含解析异常)都返回 null,由调用方回退 HTML 解析,
+     * 绝不向上抛——否则会静默丢掉唯一完整的数据源。
      */
     suspend fun fetchScheduleXls(sem: Semester): List<Course>? = withContext(Dispatchers.IO) {
-        val form = FormBody.Builder()
-            .add("xnxq01id", sem.key)
-            .add("zc", "")
-            .build()
-        val bytes = client.newCall(
-            baseRequest(baseUrl.toHttpUrl().resolve("/jsxsd/xskb/xskb_print.do?xnxq01id=${sem.key}&zc=")!!)
-                .post(form)
+        try {
+            // 先 GET 入口页注册会话状态(与成绩接口同理,部分部署直接 POST 会被 302)
+            get("/jsxsd/xskb/xskb_print.do?xnxq01id=${sem.key}").use { }
+            val form = FormBody.Builder()
+                .add("xnxq01id", sem.key)
+                .add("zc", "")
                 .build()
-        ).execute().use { r ->
-            r.body?.bytes()
-        } ?: return@withContext null
-        if (bytes.size < 8) return@withContext null
-        // OLE2 签名 D0 CF 11 E0 = 真正的 XLS;否则是 HTML(错误页/会话失效)
-        if (bytes[0] == 0xD0.toByte() && bytes[1] == 0xCF.toByte()) {
-            ScheduleXlsParser.parse(bytes)
-        } else {
-            val text = String(bytes, Charsets.UTF_8)
-            if (isSessionLost(text)) throw JwException("会话已失效,请重新登录")
+            val req = baseRequest(
+                baseUrl.toHttpUrl().resolve("/jsxsd/xskb/xskb_print.do?xnxq01id=${sem.key}&zc=")!!,
+            ).post(form).build()
+            // 全局不跟跳:打印接口可能 302(登录页或文件直出),手动跟到最终响应
+            val bytes = follow(req).first.use { r -> r.body?.bytes() }
+                ?: return@withContext null
+            if (bytes.size < 8) return@withContext null
+            // OLE2 签名 D0 CF 11 E0 = 真正的 XLS;否则是 HTML(错误页/会话失效)
+            if (bytes[0] == 0xD0.toByte() && bytes[1] == 0xCF.toByte()) {
+                try {
+                    ScheduleXlsParser.parse(bytes)
+                } catch (_: Exception) {
+                    null
+                }
+            } else {
+                null
+            }
+        } catch (_: Exception) {
             null
         }
     }
@@ -226,7 +234,12 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
     private val TD_RE = Regex("""<td[^>]*>([\s\S]*?)</td>""", RegexOption.IGNORE_CASE)
     private val TH_RE = Regex("""<th[^>]*>([\s\S]*?)</th>""", RegexOption.IGNORE_CASE)
     private val TR_RE = Regex("""<tr[^>]*>([\s\S]*?)</tr>""", RegexOption.IGNORE_CASE)
-    private val DIV_RE = Regex("""<div id="[^"]*" class="kbcontent\d*">([\s\S]*?)</div>""", RegexOption.IGNORE_CASE)
+    // 注意:服务端模板对 div 属性输出不稳定(id/class 间空格数不定,可能夹 style="display:none;"),
+    // 必须容忍任意属性顺序与空白,否则部分列的格子会解析为空(表现为课表只剩前两列)
+    private val DIV_RE = Regex(
+        """<div[^>]*\bclass="kbcontent\d*"[^>]*>([\s\S]*?)</div>""",
+        RegexOption.IGNORE_CASE,
+    )
     private val ROW_LABEL_RE = Regex("""第\s*([一二三四五六七八九十])\s*大节""")
 
     /** 清理单元格 HTML 为纯文本行 */
@@ -272,7 +285,10 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
             val tds = TD_RE.findAll(row).map { it.groupValues[1] }.toList()
             for ((idx, td) in tds.withIndex()) {
                 if (idx >= 7) break
-                val divs = DIV_RE.findAll(td).map { it.groupValues[1] }.toList()
+                val allDivs = DIV_RE.findAll(td).map { it.groupValues[1] }.toList()
+                // 格内有两个 div:可见(kbcontent1,含周次/教室)与隐藏(kbcontent,display:none,
+                // 内容是 分组/教师 变体,无周次行)。优先取含周次的,避免把教师行当成教室
+                val divs = allDivs.filter { it.contains("周") }.ifEmpty { allDivs.take(1) }
                 for (div in divs) {
                     parseScheduleCell(div, idx + 1, sections)?.let { out += it }
                 }
