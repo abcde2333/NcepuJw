@@ -96,6 +96,7 @@ import com.ncepu.jw.ui.WaterUiState
 import com.ncepu.jw.ui.applyBackgroundBlur
 import com.ncepu.jw.ui.theme.NcepuTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Calendar
@@ -115,6 +116,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     val client = JwClient()
     val settings = SettingsStore(app)
     private val client2 = OkHttpClient()
+
+    // 提醒设置(状态驱动:设置页改完立即生效,不用退出重进)
+    var reminderEnabled by mutableStateOf(settings.reminderEnabled)
+    var examReminderEnabled by mutableStateOf(settings.examReminderEnabled)
+    var leadMinutes by mutableStateOf(settings.leadMinutes)
+    var sectionTimes by mutableStateOf(settings.sectionTimes)
 
     var account by mutableStateOf("")
     var password by mutableStateOf("")
@@ -145,6 +152,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var xkRounds by mutableStateOf<List<com.ncepu.jw.data.XkRound>>(emptyList())
     var selectedCourses by mutableStateOf<List<com.ncepu.jw.data.SelectedCourse>>(emptyList())
     var selectionLoaded by mutableStateOf(false)
+    private var selCacheTime by mutableStateOf(0L)
+
+    companion object {
+        /** 选课缓存视为过期的时间(超时后进入选课页才再次请求) */
+        private const val SEL_STALE_MS = 10 * 60_000L
+    }
 
     var pyfaLoading by mutableStateOf(false)
     var pyfaError by mutableStateOf<String?>(null)
@@ -177,6 +190,27 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var skippedLogin by mutableStateOf(false)   // 跳过教务登录(离线/仅用饮水机)
 
     init {
+        // 首屏直出:先把本地缓存的课表灌进状态(弱网/校外不再白屏转圈),
+        // 之后登录成功时会静默刷新覆盖
+        viewModelScope.launch(Dispatchers.IO) {
+            val cached = settings.loadCachedCourses()
+            if (cached.isNotEmpty() && allCourses.isEmpty()) {
+                allCourses = cached
+                courses = cached
+                schedLoaded = true
+                officialWeek = localCurrentWeek()
+                selectedWeek = officialWeek
+            }
+            // 选课中心同理:缓存直出,避免频繁切页触发风控
+            settings.loadCachedSelection()?.let { sel ->
+                if (xkRounds.isEmpty()) {
+                    xkRounds = sel.rounds
+                    selectedCourses = sel.selected
+                    selectionLoaded = true
+                    selCacheTime = sel.time
+                }
+            }
+        }
         // 冷却倒计时(饮水/洗衣机短信共用)
         viewModelScope.launch {
             while (true) {
@@ -259,14 +293,19 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
-    fun loadWaterDevices() {
+    fun loadWaterDevices(silent: Boolean = false) {
         if (waterToken.isBlank()) waterToken = settings.waterToken
         if (waterToken.isBlank()) {
             waterState = waterState.copy(loggedIn = false)
             refreshCaptcha()
             return
         }
-        waterState = waterState.copy(loggedIn = true, loading = true, message = null)
+        // silent:列表已上屏的静默刷新,不清 message、不闪 loading
+        waterState = waterState.copy(
+            loggedIn = true,
+            loading = !silent || waterState.devices.isEmpty(),
+            message = if (silent) waterState.message else null,
+        )
         viewModelScope.launch {
             try {
                 // 账号状态刷新:view-info 验证 token(设备平台 1,1)
@@ -554,7 +593,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 loggedIn = true
                 name = client.studentName
                 settings.storeCredentials(account.trim(), password)
-                loadSchedule()
+                // 缓存已上屏则后台静默刷新,否则正常加载(带 loading)
+                loadSchedule(force = allCourses.isNotEmpty(), silent = allCourses.isNotEmpty())
                 loadGrades()
             } else {
                 loginError = err
@@ -563,54 +603,67 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 加载学期全量课表(GET /jsxsd/xskb/xskb_list.do?xnxq01id=,一次请求),
-     * 周次切换全部本地过滤完成,不再按周请求(避免滑动多次后周次漂移)。
+     * 加载学期全量课表:本地按周过滤,不再按周请求(避免滑动多次后周次漂移)。
+     * XLS / HTML / 官方周次三个请求并发;silent=true 用于缓存已上屏后的后台刷新
+     * (不显示 loading,失败不打扰,完成后保留用户当前所在周)。
      */
-    fun loadSchedule(force: Boolean = false) {
+    fun loadSchedule(force: Boolean = false, silent: Boolean = false) {
         if (schedLoaded && !force) {
             schedMode = "WEEK"
             selectedWeek = officialWeek
             courses = allCourses
             return
         }
-        schedLoading = true
-        schedError = null
+        val hadCache = allCourses.isNotEmpty()
+        if (!silent) {
+            schedLoading = true
+            schedError = null
+        }
         viewModelScope.launch {
             try {
-                // 双源:XLS 导出(格式规整)+ 课表页 HTML 解析。
-                // 任一源都可能残缺(实测服务器 HTML 曾只剩周一二),取星期覆盖更全的一份;
-                // 两者都失败时抛出真实的错误(会话失效/评教拦截等)
-                val xls = try { client.fetchScheduleXls(schedSem) } catch (_: Exception) { null }
-                var htmlErr: Exception? = null
-                val html = try { client.fetchCourses(schedSem) } catch (e: Exception) { htmlErr = e; null }
-                val xlsClean = xls?.takeIf { it.isNotEmpty() }
-                val htmlClean = html?.takeIf { it.isNotEmpty() }
-                if (xlsClean == null && htmlClean == null) {
+                // 双源并发:XLS 导出(格式规整)+ 课表页 HTML 解析;
+                // 任一源都可能残缺(实测服务器 HTML 曾只剩周一二),取星期覆盖更全的一份
+                val xlsDef = async { runCatching { client.fetchScheduleXls(schedSem) }.getOrNull() }
+                var htmlErr: Throwable? = null
+                val htmlDef = async {
+                    runCatching { client.fetchCourses(schedSem) }
+                        .onFailure { htmlErr = it }
+                        .getOrNull()
+                }
+                val weekDef = async {
+                    runCatching { client.fetchHomeWeek(thisWeekThursdayText()).week.takeIf { it > 0 } }
+                        .getOrNull()
+                }
+                val xls = xlsDef.await()?.takeIf { it.isNotEmpty() }
+                val html = htmlDef.await()?.takeIf { it.isNotEmpty() }
+                if (xls == null && html == null) {
                     throw htmlErr ?: JwException("课表获取失败,请稍后重试")
                 }
-                val xlsDays = xlsClean?.map { it.day }?.distinct()?.size ?: 0
-                val htmlDays = htmlClean?.map { it.day }?.distinct()?.size ?: 0
-                val full = if (htmlDays > xlsDays) htmlClean!! else xlsClean ?: htmlClean!!
+                val xlsDays = xls?.map { it.day }?.distinct()?.size ?: 0
+                val htmlDays = html?.map { it.day }?.distinct()?.size ?: 0
+                val full = if (htmlDays > xlsDays) html!! else xls ?: html!!
+                val hadShown = schedLoaded
                 allCourses = full
                 courses = full
                 schedLoaded = true
                 name = client.studentName ?: name
                 settings.cacheCourses(full)
-                // 官方当前周:用首页周课表接口取一次(周四锚定,规避周定义边界)
-                officialWeek = try {
-                    client.fetchHomeWeek(thisWeekThursdayText()).week.takeIf { it > 0 }
-                        ?: localCurrentWeek()
-                } catch (_: Exception) {
-                    localCurrentWeek()
-                }
-                selectedWeek = officialWeek
+                // 官方当前周:周四锚定(与三请求并发);拿不到则本地推断
+                officialWeek = weekDef.await() ?: localCurrentWeek()
+                // 已有界面在显示时(静默刷新)保留用户所在周,否则跳到当前周
+                selectedWeek = if (hadShown) selectedWeek.coerceIn(1, 25) else officialWeek
                 schedMode = "WEEK"
                 if (settings.reminderEnabled) {
                     ReminderScheduler.reschedule(getApplication())
                 }
-                schedError = if (full.isEmpty()) "本学期暂无课表(接口返回为空)" else null
+                if (!silent || full.isEmpty()) {
+                    schedError = if (full.isEmpty()) "本学期暂无课表(接口返回为空)" else null
+                }
             } catch (e: Exception) {
-                schedError = e.message ?: "加载失败"
+                // 缓存已上屏的静默刷新失败:不打扰用户,下次进入再试
+                if (!silent || allCourses.isEmpty()) {
+                    schedError = e.message ?: "加载失败"
+                }
             } finally {
                 schedLoading = false
             }
@@ -667,17 +720,33 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
-    fun loadSelection() {
-        selLoading = true
-        selError = null
+    /**
+     * 选课中心:接口有风控,做本地缓存 + 时间频控。
+     * - 缓存未过期(SEL_STALE_MS 内)时切换到选课页不再发请求;
+     * - 缓存过期才静默刷新(列表已上屏,不闪 loading);失败不打扰。
+     * force=true(下拉刷新/重试)绕过频控。
+     */
+    fun loadSelection(force: Boolean = false) {
+        if (selLoading) return
+        val fresh = System.currentTimeMillis() - selCacheTime < SEL_STALE_MS
+        if (selectionLoaded && fresh && !force) return
+        val silent = selectionLoaded || xkRounds.isNotEmpty()
+        if (!silent) {
+            selLoading = true
+            selError = null
+        }
         viewModelScope.launch {
             try {
-                xkRounds = client.fetchXkRounds()
-                selectedCourses = client.fetchSelectedCourses(gradeSem)
+                val rounds = client.fetchXkRounds()
+                val selected = client.fetchSelectedCourses(gradeSem)
+                xkRounds = rounds
+                selectedCourses = selected
                 selectionLoaded = true
+                selCacheTime = System.currentTimeMillis()
                 selError = null
+                withContext(Dispatchers.IO) { settings.cacheSelection(rounds, selected) }
             } catch (e: Exception) {
-                selError = e.message ?: "加载失败"
+                if (!silent || xkRounds.isEmpty()) selError = e.message ?: "加载失败"
             } finally {
                 selLoading = false
             }
@@ -719,7 +788,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         loggedIn = false
         account = ""; password = ""
         courses = emptyList(); grades = emptyList()
-        xkRounds = emptyList(); selectedCourses = emptyList(); selectionLoaded = false
+        xkRounds = emptyList(); selectedCourses = emptyList(); selectionLoaded = false; selCacheTime = 0
         allCourses = emptyList(); schedLoaded = false
         pyfa = null; pyfaError = null
         exams = emptyList(); examError = null
@@ -758,6 +827,8 @@ class MainActivity : ComponentActivity() {
         // edge-to-edge:内容延伸到状态栏/导航条后面,背景与暗化全屏覆盖
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val settings = SettingsStore(this)
+        // 提醒通知渠道:高重要性(横幅+声音+震动),App 启动即建
+        com.ncepu.jw.reminder.ReminderScheduler.ensureChannel(this)
 
         setContent {
             var themeMode by mutableStateOf(settings.themeMode)
@@ -906,7 +977,6 @@ class MainActivity : ComponentActivity() {
                                 navController.navigate("pyfa")
                             },
                             onOpenExams = { navController.navigate("exams") },
-                            onOpenWater = { navController.navigate("water") },
                             onOpenWaterScan = { navController.navigate("waterscan") },
                             onOpenWasher = { navController.navigate("washer") },
                             onOpenWasherScan = { navController.navigate("washerscan") },
@@ -1002,32 +1072,6 @@ class MainActivity : ComponentActivity() {
                             onCancel = { navController.popBackStack() },
                         )
                     }
-                    composable("water") {
-                        WaterScreen(
-                            state = vm.waterState,
-                            phone = vm.waterPhone,
-                            smsCode = vm.waterSmsCode,
-                            captchaInput = vm.waterCaptchaInput,
-                            smsCooldown = vm.waterSmsCooldown,
-                            onPhoneChange = { vm.waterPhone = it },
-                            onSmsCodeChange = { vm.waterSmsCode = it },
-                            onCaptchaInputChange = { vm.waterCaptchaInput = it },
-                            onRefreshCaptcha = { vm.refreshCaptcha() },
-                            onSendSms = { vm.sendWaterSms() },
-                            onLogin = { vm.doWaterLogin() },
-                            onRefreshDevices = { vm.loadWaterDevices() },
-                            onStartDevice = { vm.startWaterDevice(it) },
-                            onEndDevice = { vm.endWaterDevice(it) },
-                            onAddDevice = { did, name ->
-                                vm.addWaterDevice(did, name)
-                                vm.waterScanResult = null
-                            },
-                            onRemoveDevice = { did -> vm.removeWaterDevice(did) },
-                            onScan = { navController.navigate("waterscan") },
-                            scanResult = vm.waterScanResult,
-                            onBack = { navController.popBackStack() },
-                        )
-                    }
                     composable("exams") {
                         ExamScreen(
                             semesters = vm.semesters,
@@ -1091,10 +1135,10 @@ class MainActivity : ComponentActivity() {
                             hasBackground = appearance.bgHas,
                             bgBlur = appearance.bgBlur,
                             bgDim = appearance.bgDim,
-                            reminderEnabled = vm.settings.reminderEnabled,
-                            examReminderEnabled = vm.settings.examReminderEnabled,
-                            leadMinutes = vm.settings.leadMinutes,
-                            sectionTimes = vm.settings.sectionTimes,
+                            reminderEnabled = vm.reminderEnabled,
+                            examReminderEnabled = vm.examReminderEnabled,
+                            leadMinutes = vm.leadMinutes,
+                            sectionTimes = vm.sectionTimes,
                             weekStartMillis = appearance.weekStartMillis,
                             exactAlarmGranted = isExactAlarmGranted(ctx),
                             onThemeModeChange = onThemeModeChange,
@@ -1124,16 +1168,22 @@ class MainActivity : ComponentActivity() {
                                 vm.settings.bgDim = f
                                 onAppearanceChange(appearance.copy(bgDim = f))
                             },
-                            onReminderToggle = { applyReminder(it) },
+                            onReminderToggle = { enabled ->
+                                vm.reminderEnabled = enabled
+                                applyReminder(enabled)
+                            },
                             onExamReminderToggle = { enabled ->
+                                vm.examReminderEnabled = enabled
                                 vm.settings.examReminderEnabled = enabled
                                 ReminderScheduler.reschedule(ctx)
                             },
                             onLeadChange = { min ->
+                                vm.leadMinutes = min
                                 vm.settings.leadMinutes = min
                                 ReminderScheduler.reschedule(ctx)
                             },
                             onTimesChange = { times ->
+                                vm.sectionTimes = times
                                 vm.settings.sectionTimes = times
                                 ReminderScheduler.reschedule(ctx)
                             },
@@ -1190,7 +1240,6 @@ class MainActivity : ComponentActivity() {
         onOpenSettings: () -> Unit,
         onOpenPyfa: () -> Unit,
         onOpenExams: () -> Unit,
-        onOpenWater: () -> Unit,
         onOpenWaterScan: () -> Unit,
         onOpenWasherScan: () -> Unit,
         onOpenWasher: () -> Unit,
@@ -1231,8 +1280,8 @@ class MainActivity : ComponentActivity() {
             true
         }
         val densityValue = LocalDensity.current.density
-        // 背景图解码在 IO 线程,避免阻塞主线程
-        LaunchedEffect(appearance.bgHas, appearance.bgVersion, appearance.bgBlur, densityValue) {
+        // 解码只依赖背景图本身;调模糊滑杆不再从磁盘重解 bitmap
+        LaunchedEffect(appearance.bgHas, appearance.bgVersion) {
             if (!appearance.bgHas) {
                 bgImageView.setImageDrawable(null)
                 return@LaunchedEffect
@@ -1241,7 +1290,10 @@ class MainActivity : ComponentActivity() {
                 vm.settings.backgroundFile()?.let { loadBgBitmap(it) }
             }
             bgImageView.setImageBitmap(bmp?.asAndroidBitmap())
-            applyBackgroundBlur(bgImageView, appearance.bgBlur, densityValue)
+        }
+        // 模糊只重设 RenderEffect,与解码解耦
+        LaunchedEffect(appearance.bgHas, appearance.bgBlur, densityValue) {
+            applyBackgroundBlur(bgImageView, if (appearance.bgHas) appearance.bgBlur else 0f, densityValue)
         }
         LaunchedEffect(appearance.bgDim, appearance.bgVersion) {
             dimDrawable.alpha = (appearance.bgDim.coerceIn(0f, 0.85f) * 255).toInt()
@@ -1263,9 +1315,9 @@ class MainActivity : ComponentActivity() {
                         onSelect = { t ->
                             tab = t
                             when (t) {
-                                0 -> if (vm.allCourses.isEmpty() && !vm.skippedLogin) vm.loadSchedule()
-                                1 -> vm.loadWaterDevices()
-                                2 -> if (!vm.selectionLoaded) vm.loadSelection()
+                            0 -> if (vm.allCourses.isEmpty() && !vm.skippedLogin) vm.loadSchedule()
+                            1 -> vm.loadWaterDevices(silent = vm.waterState.devices.isNotEmpty())
+                            2 -> vm.loadSelection()
                             }
                         },
                         isDark = isDark,
@@ -1325,7 +1377,6 @@ class MainActivity : ComponentActivity() {
                                 onRemoveDevice = { did -> vm.removeWaterDevice(did) },
                                 onScan = onOpenWaterScan,
                                 scanResult = vm.waterScanResult,
-                                onBack = { },
                             )
                             2 -> SelectionScreen(
                                 loading = vm.selLoading,
@@ -1342,7 +1393,6 @@ class MainActivity : ComponentActivity() {
                                 onOpenJwxtLogin = onOpenJwxtLogin,
                                 onOpenSettings = onOpenSettings,
                                 onOpenPyfa = onOpenPyfa,
-                                onOpenWater = onOpenWater,
                                 onOpenWasher = onOpenWasher,
                                 onOpenGrades = onOpenGradesNav,
                                 onLogout = {

@@ -113,6 +113,18 @@ fun WaterScanScreen(
                                 .build()
                         )
                         val analysis = ImageAnalysis.Builder()
+                            // 限到 720p:ML Kit 扫码足够,整帧分析负载和发热都显著下降
+                            .setResolutionSelector(
+                                androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+                                    .setResolutionStrategy(
+                                        androidx.camera.core.resolutionselector.ResolutionStrategy(
+                                            android.util.Size(1280, 720),
+                                            androidx.camera.core.resolutionselector.ResolutionStrategy
+                                                .FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                                        )
+                                    )
+                                    .build()
+                            )
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .build()
                         analysis.setAnalyzer(executor) { imageProxy ->

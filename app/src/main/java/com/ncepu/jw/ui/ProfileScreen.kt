@@ -14,7 +14,6 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LocalLaundryService
 import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.MenuBook
-import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -37,7 +36,6 @@ fun ProfileScreen(
     onOpenJwxtLogin: () -> Unit = {},
     onOpenSettings: () -> Unit,
     onOpenPyfa: () -> Unit,
-    onOpenWater: () -> Unit,
     onOpenWasher: () -> Unit,
     onOpenGrades: () -> Unit,
     onLogout: () -> Unit,
@@ -81,7 +79,6 @@ fun ProfileScreen(
         } else {
             EntryCard("登录教务系统", Icons.Filled.Login, onOpenJwxtLogin)
         }
-        EntryCard("饮水机", Icons.Filled.WaterDrop, onOpenWater)
         EntryCard("U净洗衣", Icons.Filled.LocalLaundryService, onOpenWasher)
         EntryCard("培养方案", Icons.Filled.MenuBook, onOpenPyfa)
         EntryCard("设置", Icons.Filled.Settings, onOpenSettings)

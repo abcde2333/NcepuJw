@@ -372,24 +372,28 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
 
     /** 选课中心轮次列表 */
     suspend fun fetchXkRounds(): List<XkRound> = withContext(Dispatchers.IO) {
-        val html = get("/jsxsd/xsxk/xklc_list").use { r ->
+        get("/jsxsd/xsxk/xklc_list").use { r ->
             val body = r.body?.string().orEmpty()
-            if (isSessionLost(body)) throw JwException("会话已失效,请重新登录")
-            body
+            // 全局不跟跳:会话失效时该接口 302 到登录页,响应体为空,
+            // 不判重定向会把空内容当"无轮次"静默显示
+            if (r.isRedirect || isSessionLost(body)) throw JwException("会话已失效,请重新登录")
+            parseXkRounds(body)
         }
-        parseXkRounds(html)
     }
 
     /** 已选课程结果 */
     suspend fun fetchSelectedCourses(sem: Semester): List<SelectedCourse> = withContext(Dispatchers.IO) {
-        get("/jsxsd/xkgl/xsxkjgcx").use { it.body?.string() }
+        get("/jsxsd/xkgl/xsxkjgcx").use { r ->
+            if (r.isRedirect) throw JwException("会话已失效,请重新登录")
+            r.body?.string().orEmpty()
+        }
         val html = postForm(
             "/jsxsd/xkgl/loadXsxkjgList",
             mapOf("xnxqid" to sem.key),
             "$baseUrl/jsxsd/xkgl/xsxkjgcx",
         ).use { r ->
             val body = r.body?.string().orEmpty()
-            if (isSessionLost(body)) throw JwException("会话已失效,请重新登录")
+            if (r.isRedirect || isSessionLost(body)) throw JwException("会话已失效,请重新登录")
             body
         }
         parseSelectedCourses(html)

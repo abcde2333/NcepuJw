@@ -22,6 +22,23 @@ object ReminderScheduler {
     private const val REFRESH_REQUEST_CODE = 10001
     const val CHANNEL_ID = "class_reminder"
 
+    /**
+     * 显式创建通知渠道(高重要性:横幅 + 声音 + 震动,纯通知方式提醒)。
+     * 不创建的话首次 notify 会按系统默认(无横幅)自动建渠道,后续改不回来。
+     */
+    fun ensureChannel(context: Context) {
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        if (nm.getNotificationChannel(CHANNEL_ID) != null) return
+        val channel = android.app.NotificationChannel(
+            CHANNEL_ID, "上课/考试提醒", android.app.NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = "上课与考试的提前提醒通知"
+            enableVibration(true)
+            setShowBadge(true)
+        }
+        nm.createNotificationChannel(channel)
+    }
+
     private fun calendarDayOfWeekToCourseDay(dow: Int): Int = when (dow) {
         Calendar.MONDAY -> 1; Calendar.TUESDAY -> 2; Calendar.WEDNESDAY -> 3
         Calendar.THURSDAY -> 4; Calendar.FRIDAY -> 5; Calendar.SATURDAY -> 6
@@ -46,11 +63,12 @@ object ReminderScheduler {
             val dayId = day.get(Calendar.YEAR) * 10000 +
                 (day.get(Calendar.MONTH) + 1) * 100 + day.get(Calendar.DAY_OF_MONTH)
 
-            // 该天每个大节的第一门课
+            // 该天每个大节的第一门课(11-12 节及以后不排提醒)
             val byRow = LinkedHashMap<Int, Course>()
             for (c in courses) {
                 if (c.day != dow) continue
                 val row = SettingsStore.sectionRowIndex(c.sections.first)
+                if (row < 0 || row >= times.size) continue
                 if (!byRow.containsKey(row)) byRow[row] = c
             }
 

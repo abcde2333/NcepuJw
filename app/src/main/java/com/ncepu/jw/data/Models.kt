@@ -1,7 +1,12 @@
 package com.ncepu.jw.data
 
+import androidx.compose.runtime.Immutable
+
 /**
  * 数据模型(华电教务系统 = 强智老版 jsxsd 部署)
+ * UI 层大量持有这些类型:@Immutable 让 Compose 把它们视为稳定类型,
+ * 状态变化时未变的课程卡片/列表项可以跳过重组(否则 List<Course> 永远不稳定,
+ * 课表翻页等场景整网格重组掉帧)。
  */
 
 /** 学年学期。key 格式 "2026-2027-1",课表与成绩接口通用 */
@@ -39,6 +44,7 @@ data class Semester(val year: Int, val term: Int) {
 }
 
 /** 单门课程的一条课表记录 */
+@Immutable
 data class Course(
     val name: String,       // 课程名
     val day: Int,           // 1-7 星期一~日
@@ -52,6 +58,7 @@ data class Course(
 )
 
 /** 单门课程成绩 */
+@Immutable
 data class Grade(
     val course: String,     // 课程名称
     val score: String,      // 成绩
@@ -62,11 +69,13 @@ data class Grade(
     val term: String        // 开课学期,如 "2025-2026-1"
 )
 
+@Immutable
 data class GradesPage(
     val items: List<Grade>, // 全部学期成绩,调用方按 term 过滤
 )
 
 /** 选课中心的一个选课轮次 */
+@Immutable
 data class XkRound(
     val term: String,       // 学年学期,如 2026-2027-1
     val name: String,       // 轮次名称,如 "2026-2027-1学期辅修选课"
@@ -79,6 +88,7 @@ data class XkRound(
 )
 
 /** 已选课程(选课结果) */
+@Immutable
 data class SelectedCourse(
     val code: String,       // 课程编号
     val name: String,       // 课程名称
@@ -92,6 +102,7 @@ data class SelectedCourse(
 )
 
 /** 培养方案中的课程(教学进程表) */
+@Immutable
 data class PyfaCourse(
     val category: String,   // 类别(公共基础教育/学科门类基础/专业基础/…)
     val code: String,       // 课程编号
@@ -105,6 +116,7 @@ data class PyfaCourse(
 )
 
 /** 培养方案整体 */
+@Immutable
 data class PyfaData(
     val major: String,          // 专业名
     val grade: String,          // 适用年级
@@ -115,6 +127,7 @@ data class PyfaData(
 )
 
 /** 一场考试 */
+@Immutable
 data class Exam(
     val type: String,       // 考试类型(期中考试/结课考试…)
     val code: String,       // 课程编号
@@ -129,6 +142,7 @@ data class Exam(
 )
 
 /** 教务系统首页"我的周课表"(官方按周过滤,周次零误差) */
+@Immutable
 data class HomeWeek(
     val week: Int,          // 官方周次(从课程"上课时间:第N周"提取)
     val courses: List<Course>,

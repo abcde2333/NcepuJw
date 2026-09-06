@@ -64,11 +64,18 @@ private val CourseColors = listOf(
 
 private val DAY_LABELS = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
+// 预编译正则/格式器:滑动翻页时每页都会用,现场编译是逐帧开销
+private val WEEKS_RE = Regex("""(\d+)\s*(?:[-~—]\s*(\d+))?""")
+private val TIME_RE = Regex("""(\d{1,2}):(\d{2})""")
+private val HH_MM = SimpleDateFormat("HH:mm", Locale.US)
+private val HEADER_DATE_FMT = SimpleDateFormat("yyyy/M/d", Locale.US)
+private val WEEK_DATE_FMT = SimpleDateFormat("M.d", Locale.US)
+
 /** "2-9(周),11(周)" → 周集合;无信息返回 null(全周显示) */
 fun parseWeeks(weeks: String): Set<Int>? {
     if (weeks.isBlank()) return null
     val set = mutableSetOf<Int>()
-    Regex("""(\d+)\s*(?:[-~—]\s*(\d+))?""").findAll(weeks).forEach { m ->
+    WEEKS_RE.findAll(weeks).forEach { m ->
         val a = m.groupValues[1].toIntOrNull() ?: return@forEach
         val b = m.groupValues[2].ifEmpty { m.groupValues[1] }.toIntOrNull() ?: a
         if (a in 1..30) for (x in a..minOf(b, 30)) set.add(x)
@@ -81,15 +88,14 @@ fun parseWeeks(weeks: String): Set<Int>? {
 internal fun sectionSlots(times: List<String>): List<Triple<Int, String, String>> {
     val out = mutableListOf<Triple<Int, String, String>>()
     val cal = Calendar.getInstance()
-    val fmt = { t: Long -> SimpleDateFormat("HH:mm", Locale.US).format(java.util.Date(t)) }
     for ((row, s) in times.withIndex()) {
-        val m = Regex("""(\d{1,2}):(\d{2})""").find(s) ?: continue
+        val m = TIME_RE.find(s) ?: continue
         cal.set(Calendar.HOUR_OF_DAY, m.groupValues[1].toInt())
         cal.set(Calendar.MINUTE, m.groupValues[2].toInt())
         cal.set(Calendar.SECOND, 0)
         val base = cal.timeInMillis
-        out += Triple(row * 2 + 1, fmt(base), fmt(base + 45 * 60000))
-        out += Triple(row * 2 + 2, fmt(base + 55 * 60000), fmt(base + 100 * 60000))
+        out += Triple(row * 2 + 1, HH_MM.format(java.util.Date(base)), HH_MM.format(java.util.Date(base + 45 * 60000)))
+        out += Triple(row * 2 + 2, HH_MM.format(java.util.Date(base + 55 * 60000)), HH_MM.format(java.util.Date(base + 100 * 60000)))
     }
     return out
 }
@@ -157,7 +163,7 @@ fun ScheduleScreen(
     onOpenExams: (() -> Unit)? = null,
 ) {
     var selectedCourse by remember { mutableStateOf<Course?>(null) }
-    val today = Calendar.getInstance()
+    val todayText = remember { HEADER_DATE_FMT.format(Calendar.getInstance().time) }
     val scope = rememberCoroutineScope()
 
     // 周 x 25 页;初始页 = 当前周
@@ -171,6 +177,19 @@ fun ScheduleScreen(
     }
     val page = pagerState.currentPage + 1
 
+    // 一次性把全量课表按周分桶(含无周次信息的课全周显示),
+    // 翻页时直接查表,不再逐帧"编译正则+解析字符串"
+    val coursesByWeek = remember(allCourses) {
+        val m = mutableMapOf<Int, MutableList<Course>>()
+        fun bucket(w: Int): MutableList<Course> = m.getOrPut(w) { mutableListOf() }
+        for (c in allCourses) {
+            val weeks = parseWeeks(c.weeks)
+            if (weeks == null) for (w in 1..25) bucket(w).add(c)
+            else weeks.forEach { w -> if (w in 1..25) bucket(w).add(c) }
+        }
+        m
+    }
+
     Column(Modifier.fillMaxSize()) {
         // ---- 头部 ----
         Row(
@@ -179,7 +198,7 @@ fun ScheduleScreen(
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    SimpleDateFormat("yyyy/M/d", Locale.US).format(today.time),
+                    todayText,
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                 )
@@ -265,15 +284,13 @@ fun ScheduleScreen(
                     modifier = Modifier.fillMaxSize(),
                 ) { pageIndex ->
                     val week = pageIndex + 1
-                    val weekCourses = allCourses.filter { c ->
-                        parseWeeks(c.weeks)?.contains(week) ?: true
-                    }
+                    val weekCourses = coursesByWeek[week].orEmpty()
                     if (weekCourses.isEmpty()) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text("第 $week 周暂无课程", color = MaterialTheme.colorScheme.outline)
                         }
                     } else {
-                        val weekDates = weekDatesFor(week, officialWeek)
+                        val weekDates = remember(week, officialWeek) { weekDatesFor(week, officialWeek) }
                         CourseGrid(
                             courses = weekCourses,
                             showWeeks = false,
@@ -338,7 +355,6 @@ fun ScheduleScreen(
 
 /** 第 week 周的周一~周日日期(以官方当前周锚定) */
 private fun weekDatesFor(week: Int, officialWeek: Int): List<String> {
-    val fmt = SimpleDateFormat("M.d", Locale.US)
     val cal = Calendar.getInstance()
     val dow = cal.get(Calendar.DAY_OF_WEEK)
     cal.add(Calendar.DAY_OF_MONTH, -((dow + 5) % 7)) // 本周一
@@ -346,7 +362,7 @@ private fun weekDatesFor(week: Int, officialWeek: Int): List<String> {
     return List(7) { i ->
         val c = cal.clone() as Calendar
         c.add(Calendar.DAY_OF_MONTH, i)
-        fmt.format(c.time)
+        WEEK_DATE_FMT.format(c.time)
     }
 }
 
@@ -422,8 +438,6 @@ private fun CourseGrid(
     val slots = remember(sectionTimes) { sectionSlots(sectionTimes) }
     val rowH = 46.dp
     val timeColW = 44.dp
-    val screenW = LocalConfiguration.current.screenWidthDp.toFloat()
-    val colW = max(((screenW - timeColW.value - 10f) / 7f), 40f).dp
     val todayIdx = remember {
         val dow = Calendar.getInstance().get(Calendar.DAY_OF_WEEK)
         when (dow) {
@@ -433,10 +447,15 @@ private fun CourseGrid(
         }
     }
     val placed = remember(courses) { placeCourses(courses) }
-    val colWpx = with(LocalDensity.current) { colW.toPx() }
     val rowHpx = with(LocalDensity.current) { rowH.toPx() }
 
-    Column(Modifier.fillMaxSize()) {
+    // BoxWithConstraints:不订阅 LocalConfiguration(避免配置变化引发整格重组),直接用分配到的宽度
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+        val screenW = maxWidth.value
+        val colW = max(((screenW - timeColW.value - 10f) / 7f), 40f).dp
+        val colWpx = with(LocalDensity.current) { colW.toPx() }
+
+        Column(Modifier.fillMaxSize()) {
         // 表头
         Row(Modifier.padding(start = timeColW)) {
             DAY_LABELS.forEachIndexed { i, label ->
@@ -546,6 +565,7 @@ private fun CourseGrid(
                     placeables.forEach { (pl, x, y) -> pl.place(x, y) }
                 }
             }
+        }
         }
     }
 }

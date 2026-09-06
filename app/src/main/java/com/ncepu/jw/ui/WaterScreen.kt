@@ -31,6 +31,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,6 +40,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -59,7 +61,7 @@ data class WaterUiState(
     val devices: List<Triple<String, String, Boolean>> = emptyList(), // did, name, running
 )
 
-/** 饮水机页:短信登录 → 设备列表 → 一键开关水 */
+/** 饮水机页:短信登录 → 设备列表 → 一键开关水(onBack=null 时为底栏内嵌,无返回键) */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WaterScreen(
@@ -81,22 +83,29 @@ fun WaterScreen(
     onRemoveDevice: (String) -> Unit,
     onScan: () -> Unit,
     scanResult: String? = null,
-    onBack: () -> Unit,
+    onBack: (() -> Unit)? = null,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     // 扫码返回:自动弹出添加对话框并回填设备编号
     LaunchedEffect(scanResult) {
         if (!scanResult.isNullOrBlank()) showAddDialog = true
     }
+    // 透明 Scaffold/顶栏:底栏 tab 内嵌时透出自定义背景
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("饮水机") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        }
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Transparent,
+                ),
             )
         },
     ) { padding ->

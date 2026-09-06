@@ -47,12 +47,22 @@ fun SelectionScreen(
     }
     LazyColumn(Modifier.fillMaxSize()) {
         item {
-            Text(
-                "选课中心",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            )
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "选课中心",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "刷新",
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable { onRetry() },
+                )
+            }
         }
         if (error != null) {
             item {
@@ -73,11 +83,15 @@ fun SelectionScreen(
         }
         if (rounds.isEmpty() && error == null) {
             item {
-                Text(
-                    "当前没有选课轮次",
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    Text("当前没有选课轮次", color = MaterialTheme.colorScheme.outline)
+                    Text(
+                        "若怀疑登录已过期,请到「我的」重新登录教务系统后点“刷新”",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
             }
         }
         item {

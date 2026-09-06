@@ -47,22 +47,22 @@ class SettingsStore(context: Context) {
         const val KEY_WASHER_TOKEN = "washer_token"
         const val KEY_WASHER_DEVICES = "washer_devices"
         const val KEY_EXAM_CACHE = "exam_cache"
+        const val KEY_SEL_CACHE = "selection_cache"
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
 
-        /** 六大节默认起始时间(大节=两小节连上),依华电实际作息:
-         *  1节08:00 / 3节10:00 / 5节14:30 / 7节16:30 / 9节19:30;
-         *  华电排课最多到第10节,11-12节仅作占位 */
-        val DEFAULT_TIMES = listOf("08:00", "10:00", "14:30", "16:30", "19:30", "21:00")
+        /** 五大节默认起始时间(大节=两小节连上),依华电实际作息:
+         *  1节08:00 / 3节10:00 / 5节14:30 / 7节16:30 / 9节19:30 */
+        val DEFAULT_TIMES = listOf("08:00", "10:00", "14:30", "16:30", "19:30")
 
-        /** 大节行 → 索引(与课表网格一致):1-2节=0, 3-4节=1, ... */
+        /** 大节行 → 索引(与课表网格一致):1-2节=0, 3-4节=1, ... ;超出 1-10 节返回 -1 */
         fun sectionRowIndex(startSection: Int): Int = when (startSection) {
             1, 2 -> 0
             3, 4 -> 1
             5, 6 -> 2
             7, 8 -> 3
             9, 10 -> 4
-            else -> 5
+            else -> -1
         }
 
         /** 当前教学周(1-based) */
@@ -335,5 +335,58 @@ class SettingsStore(context: Context) {
                 )
             }
         }.getOrDefault(emptyList())
+    }
+
+    /** 选课缓存:轮次 + 已选课程 + 抓取时间(选课接口有风控,频控在调用方做) */
+    data class SelCache(val time: Long, val rounds: List<XkRound>, val selected: List<SelectedCourse>)
+
+    fun cacheSelection(rounds: List<XkRound>, selected: List<SelectedCourse>) {
+        val root = JSONObject()
+            .put("time", System.currentTimeMillis())
+            .put("rounds", JSONArray().apply {
+                for (r in rounds) put(JSONObject().apply {
+                    put("term", r.term); put("name", r.name)
+                    put("startText", r.startText); put("endText", r.endText)
+                    put("dailyText", r.dailyText); put("status", r.status)
+                    put("ongoing", r.ongoing); put("url", r.url)
+                })
+            })
+            .put("selected", JSONArray().apply {
+                for (s in selected) put(JSONObject().apply {
+                    put("code", s.code); put("name", s.name); put("seq", s.seq)
+                    put("group", s.group); put("teacher", s.teacher)
+                    put("hours", s.hours); put("credit", s.credit)
+                    put("attr", s.attr); put("nature", s.nature)
+                })
+            })
+        prefs.edit().putString(KEY_SEL_CACHE, root.toString()).apply()
+    }
+
+    fun loadCachedSelection(): SelCache? {
+        val raw = prefs.getString(KEY_SEL_CACHE, null) ?: return null
+        return runCatching {
+            val root = JSONObject(raw)
+            val roundsArr = root.optJSONArray("rounds") ?: JSONArray()
+            val selArr = root.optJSONArray("selected") ?: JSONArray()
+            val rounds = (0 until roundsArr.length()).mapNotNull { i ->
+                val o = roundsArr.optJSONObject(i) ?: return@mapNotNull null
+                XkRound(
+                    term = o.optString("term"), name = o.optString("name"),
+                    startText = o.optString("startText"), endText = o.optString("endText"),
+                    dailyText = o.optString("dailyText"), status = o.optString("status"),
+                    ongoing = o.optBoolean("ongoing"), url = o.optString("url"),
+                )
+            }
+            val selected = (0 until selArr.length()).mapNotNull { i ->
+                val o = selArr.optJSONObject(i) ?: return@mapNotNull null
+                SelectedCourse(
+                    code = o.optString("code"), name = o.optString("name"), seq = o.optString("seq"),
+                    group = o.optString("group"), teacher = o.optString("teacher"),
+                    hours = o.optString("hours"), credit = o.optString("credit"),
+                    attr = o.optString("attr"), nature = o.optString("nature"),
+                )
+            }
+            SelCache(root.optLong("time"), rounds, selected)
+        }.getOrNull()?.takeIf { it.rounds.isNotEmpty() }
     }
 }

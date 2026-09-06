@@ -7,7 +7,6 @@ import android.widget.ImageView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,16 +28,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ncepu.jw.data.NavBarShape
@@ -56,7 +49,6 @@ private val TABS = listOf(
 /**
  * 底部导航栏:形状(标准/悬浮)× 材质(实色/高斯模糊)自由组合。
  * 高斯模糊为半透明底,配合背景图自身的模糊设置形成毛玻璃观感。
- * 按住底栏左右滑动可快速切换页面。
  */
 @Composable
 fun AppBottomBar(
@@ -66,29 +58,6 @@ fun AppBottomBar(
     onSelect: (Int) -> Unit,
     isDark: Boolean,
 ) {
-    val density = LocalDensity.current
-    var dragAccum by remember { mutableFloatStateOf(0f) }
-    val thresholdPx = with(density) { 64.dp.toPx() }
-
-    val swipeModifier = Modifier.pointerInput(Unit) {
-        detectHorizontalDragGestures(
-            onDragStart = { dragAccum = 0f },
-            onDragEnd = { dragAccum = 0f },
-            onDragCancel = { dragAccum = 0f },
-        ) { change, dragAmount ->
-            change.consume()
-            dragAccum += dragAmount
-            while (dragAccum >= thresholdPx) {
-                if (tab < TABS.size - 1) onSelect(tab + 1)
-                dragAccum -= thresholdPx
-            }
-            while (dragAccum <= -thresholdPx) {
-                if (tab > 0) onSelect(tab - 1)
-                dragAccum += thresholdPx
-            }
-        }
-    }
-
     when (shape) {
         NavBarShape.STANDARD -> {
             Surface(color = barColor(material, isDark)) {
@@ -96,8 +65,7 @@ fun AppBottomBar(
                     tab, onSelect,
                     Modifier
                         .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .then(swipeModifier),
+                        .navigationBarsPadding(),
                 )
             }
         }
@@ -107,9 +75,7 @@ fun AppBottomBar(
                     shape = RoundedCornerShape(26.dp),
                     shadowElevation = 10.dp,
                     color = Color.Transparent,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .then(swipeModifier),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Box(
                         Modifier

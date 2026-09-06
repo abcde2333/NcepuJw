@@ -101,6 +101,7 @@ class ReminderReceiver : BroadcastReceiver() {
     }
 
     private fun notify(context: Context, notification: Notification) {
+        ReminderScheduler.ensureChannel(context)
         val manager = NotificationManagerCompat.from(context)
         if (Build.VERSION.SDK_INT >= 33 &&
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)

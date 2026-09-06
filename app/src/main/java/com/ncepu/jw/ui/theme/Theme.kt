@@ -1,7 +1,5 @@
 package com.ncepu.jw.ui.theme
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
@@ -21,15 +19,14 @@ import androidx.compose.ui.platform.LocalContext
 import com.materialkolor.dynamicColorScheme
 import com.ncepu.jw.data.ThemeMode
 
-/** 主题预设:莫奈动态取色或固定种子色 */
+/** 主题预设:固定种子色(动态取色由独立开关控制,不占预设位) */
 @Immutable
-data class ThemePreset(val key: String, val label: String, val seed: Color, val dynamic: Boolean = false)
+data class ThemePreset(val key: String, val label: String, val seed: Color)
 
 val NcepuBlue = Color(0xFF1E4F91)
 
 object ThemePresets {
     val ALL = listOf(
-        ThemePreset("DYNAMIC", "莫奈取色", Color(0xFF1E4F91), dynamic = true),
         ThemePreset("NCEPU", "华电蓝", Color(0xFF1E4F91)),
         ThemePreset("CYAN", "青碧", Color(0xFF00897B)),
         ThemePreset("PURPLE", "黛紫", Color(0xFF7C4DFF)),
@@ -39,14 +36,16 @@ object ThemePresets {
         ThemePreset("INDIGO", "靛蓝", Color(0xFF3949AB)),
     )
 
-    fun byKey(key: String): ThemePreset = ALL.firstOrNull { it.key == key } ?: ALL[1]
+    fun byKey(key: String): ThemePreset = ALL.firstOrNull { it.key == key } ?: ALL.first()
 }
 
 /**
  * Material You 主题:
- * - 莫奈预设(Android 12+):从系统壁纸生成配色(结果缓存,避免切换动画期间反复取壁纸色卡顿)
- * - 其余预设:种子色离线生成完整配色(material-kolor)
- * - 深浅色:跟随系统 / 浅色 / 深色;切换时颜色平滑过渡
+ * - 动态取色开关(独立于预设):Android 12+ 从系统壁纸生成配色;关闭或切预设时清掉缓存,
+ *   否则旧莫奈配色残留会导致"主题色彩不生效"
+ * - 预设:种子色离线生成完整配色(material-kolor)
+ * - 深浅色:跟随系统 / 浅色 / 深色,直接换色
+ *   (不做逐色动画:40 个 animateColorAsState 会让整棵树每帧重组,深浅色切换必掉帧)
  */
 @Composable
 fun NcepuTheme(
@@ -63,13 +62,15 @@ fun NcepuTheme(
 
     val preset = ThemePresets.byKey(presetKey)
     val context = LocalContext.current
+    val useMonet = dynamicColor && android.os.Build.VERSION.SDK_INT >= 31
 
-    // 莫奈取色较昂贵(读壁纸),缓存到状态里,避免主题过渡动画期间每帧重新生成
-    var monetScheme by remember(darkTheme) { mutableStateOf<ColorScheme?>(null) }
-    if (preset.dynamic && dynamicColor && android.os.Build.VERSION.SDK_INT >= 31) {
-        LaunchedEffect(darkTheme) {
-            monetScheme = if (darkTheme) dynamicDarkColorScheme(context)
-            else dynamicLightColorScheme(context)
+    // 莫奈取色较昂贵(读壁纸),缓存到状态里;不启用时必须清空,否则预设色永远被旧缓存盖住
+    var monetScheme by remember { mutableStateOf<ColorScheme?>(null) }
+    LaunchedEffect(useMonet, darkTheme) {
+        monetScheme = when {
+            useMonet && darkTheme -> dynamicDarkColorScheme(context)
+            useMonet -> dynamicLightColorScheme(context)
+            else -> null
         }
     }
 
@@ -77,54 +78,8 @@ fun NcepuTheme(
         ?: dynamicColorScheme(seedColor = preset.seed, isDark = darkTheme, isAmoled = false)
 
     MaterialTheme(
-        colorScheme = baseScheme.animated(),
+        colorScheme = baseScheme,
         content = content,
-    )
-}
-
-/** 深浅色/主题切换时所有颜色平滑过渡(时长控制以兼顾流畅度) */
-@Composable
-private fun ColorScheme.animated(): ColorScheme {
-    @Composable fun c(color: Color) = animateColorAsState(
-        color, tween(280), label = "theme",
-    ).value
-    return ColorScheme(
-        primary = c(primary),
-        onPrimary = c(onPrimary),
-        primaryContainer = c(primaryContainer),
-        onPrimaryContainer = c(onPrimaryContainer),
-        inversePrimary = c(inversePrimary),
-        secondary = c(secondary),
-        onSecondary = c(onSecondary),
-        secondaryContainer = c(secondaryContainer),
-        onSecondaryContainer = c(onSecondaryContainer),
-        tertiary = c(tertiary),
-        onTertiary = c(onTertiary),
-        tertiaryContainer = c(tertiaryContainer),
-        onTertiaryContainer = c(onTertiaryContainer),
-        background = c(background),
-        onBackground = c(onBackground),
-        surface = c(surface),
-        onSurface = c(onSurface),
-        surfaceVariant = c(surfaceVariant),
-        onSurfaceVariant = c(onSurfaceVariant),
-        surfaceTint = c(surfaceTint),
-        inverseSurface = c(inverseSurface),
-        inverseOnSurface = c(inverseOnSurface),
-        error = c(error),
-        onError = c(onError),
-        errorContainer = c(errorContainer),
-        onErrorContainer = c(onErrorContainer),
-        outline = c(outline),
-        outlineVariant = c(outlineVariant),
-        scrim = c(scrim),
-        surfaceBright = c(surfaceBright),
-        surfaceDim = c(surfaceDim),
-        surfaceContainer = c(surfaceContainer),
-        surfaceContainerHigh = c(surfaceContainerHigh),
-        surfaceContainerHighest = c(surfaceContainerHighest),
-        surfaceContainerLow = c(surfaceContainerLow),
-        surfaceContainerLowest = c(surfaceContainerLowest),
     )
 }
 

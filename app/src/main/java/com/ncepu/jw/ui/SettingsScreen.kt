@@ -43,6 +43,8 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
@@ -104,7 +106,7 @@ fun SettingsScreen(
 ) {
     var showTimeDialog by remember { mutableStateOf(false) }
     var showDateDialog by remember { mutableStateOf(false) }
-    val preset = ThemePresets.byKey(presetKey)
+    var showLeadDialog by remember { mutableStateOf(false) }
 
     Column(
         Modifier
@@ -145,42 +147,42 @@ fun SettingsScreen(
             },
         )
 
-        ListItem(
-            headlineContent = { Text("主题色彩") },
-            supportingContent = {
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    ThemePresets.ALL.forEach { p ->
-                        val swatch = if (p.dynamic) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            dynamicColorScheme(seedColor = p.seed, isDark = false, isAmoled = false).primary
+        if (!dynamicColor) {
+            ListItem(
+                headlineContent = { Text("主题色彩") },
+                supportingContent = {
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        ThemePresets.ALL.forEach { p ->
+                            val swatch = dynamicColorScheme(
+                                seedColor = p.seed, isDark = false, isAmoled = false,
+                            ).primary
+                            Box(
+                                Modifier
+                                    .size(34.dp)
+                                    .background(swatch, CircleShape)
+                                    .border(
+                                        if (presetKey == p.key) 3.dp else 1.dp,
+                                        if (presetKey == p.key) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.outlineVariant,
+                                        CircleShape,
+                                    )
+                                    .clickable { onPresetChange(p.key) },
+                                contentAlignment = Alignment.Center,
+                            ) {}
                         }
-                        Box(
-                            Modifier
-                                .size(34.dp)
-                                .background(swatch, CircleShape)
-                                .border(
-                                    if (presetKey == p.key) 3.dp else 1.dp,
-                                    if (presetKey == p.key) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.outlineVariant,
-                                    CircleShape,
-                                )
-                                .clickable { onPresetChange(p.key) },
-                            contentAlignment = Alignment.Center,
-                        ) {}
                     }
-                }
-            },
-        )
+                },
+            )
+        }
         ListItem(
             headlineContent = { Text("莫奈动态取色") },
             supportingContent = {
                 Text(
-                    if (preset.dynamic) "选中“莫奈取色”时按系统壁纸配色"
-                    else "切到“莫奈取色”预设后生效",
+                    if (dynamicColor) "按系统壁纸自动配色(Android 12+);关闭后可自选主题色彩"
+                    else "关闭中:使用下方主题色彩预设",
                     style = MaterialTheme.typography.bodySmall,
                 )
             },
@@ -242,7 +244,7 @@ fun SettingsScreen(
                         }
                     }
                     Text(
-                        "高斯模糊为半透明底,配合背景图的模糊设置使用效果最佳;按住底栏左右滑动可快速切换页面",
+                        "高斯模糊为半透明底,配合背景图的模糊设置使用效果最佳",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(top = 6.dp),
@@ -332,13 +334,20 @@ fun SettingsScreen(
             headlineContent = { Text("提前提醒") },
             supportingContent = {
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                    listOf(0, 5, 10, 15, 20).forEachIndexed { i, min ->
+                    val fixed = listOf(0, 10, 15, 20)
+                    val custom = leadMinutes !in fixed
+                    fixed.forEachIndexed { i, min ->
                         SegmentedButton(
                             selected = leadMinutes == min,
                             onClick = { onLeadChange(min) },
-                            shape = SegmentedButtonDefaults.itemShape(i, 5),
+                            shape = SegmentedButtonDefaults.itemShape(i, fixed.size + 1),
                         ) { Text(if (min == 0) "准时" else "${min}分") }
                     }
+                    SegmentedButton(
+                        selected = custom,
+                        onClick = { showLeadDialog = true },
+                        shape = SegmentedButtonDefaults.itemShape(fixed.size, fixed.size + 1),
+                    ) { Text(if (custom && leadMinutes > 0) "${leadMinutes}分" else "自定义") }
                 }
             },
         )
@@ -386,6 +395,49 @@ fun SettingsScreen(
             DatePicker(state = state)
         }
     }
+    if (showLeadDialog) {
+        LeadEditDialog(
+            initial = leadMinutes,
+            onDismiss = { showLeadDialog = false },
+            onConfirm = { min ->
+                showLeadDialog = false
+                onLeadChange(min)
+            },
+        )
+    }
+}
+
+@Composable
+private fun LeadEditDialog(
+    initial: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit,
+) {
+    var text by remember { mutableStateOf(if (initial > 0) initial.toString() else "") }
+    val parsed = text.trim().toIntOrNull()
+    val valid = parsed != null && parsed in 1..120
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自定义提前提醒") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it.filter { c -> c.isDigit() }.take(3) },
+                    label = { Text("提前分钟数") },
+                    supportingText = { Text("1 - 120 分钟") },
+                    singleLine = true,
+                    isError = text.isNotBlank() && !valid,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { if (valid) onConfirm(parsed!!) }, enabled = valid) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable
@@ -407,7 +459,7 @@ private fun TimeEditDialog(
     onConfirm: (List<String>) -> Unit,
 ) {
     val values = remember { initial.toMutableList() }
-    val labels = listOf("1-2节", "3-4节", "5-6节", "7-8节", "9-10节", "11-12节")
+    val labels = listOf("1-2节", "3-4节", "5-6节", "7-8节", "9-10节")
 
     AlertDialog(
         onDismissRequest = onDismiss,
