@@ -57,6 +57,9 @@ import androidx.navigation.compose.rememberNavController
 import com.ncepu.jw.data.Course
 import com.ncepu.jw.data.Grade
 import com.ncepu.jw.data.JwClient
+import com.ncepu.jw.data.IlifeClient
+import okhttp3.OkHttpClient
+import org.json.JSONObject
 import com.ncepu.jw.data.NavBarShape
 import com.ncepu.jw.data.NavMaterial
 import com.ncepu.jw.data.Semester
@@ -73,6 +76,8 @@ import com.ncepu.jw.ui.PyfaScreen
 import com.ncepu.jw.ui.ScheduleScreen
 import com.ncepu.jw.ui.SelectionScreen
 import com.ncepu.jw.ui.SettingsScreen
+import com.ncepu.jw.ui.WaterScreen
+import com.ncepu.jw.ui.WaterUiState
 import com.ncepu.jw.ui.applyBackgroundBlur
 import com.ncepu.jw.ui.theme.NcepuTheme
 import kotlinx.coroutines.Dispatchers
@@ -94,6 +99,7 @@ data class Appearance(
 class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     val client = JwClient()
     val settings = SettingsStore(app)
+    private val client2 = OkHttpClient()
 
     var account by mutableStateOf("")
     var password by mutableStateOf("")
@@ -137,6 +143,105 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var examLoading by mutableStateOf(false)
     var examError by mutableStateOf<String?>(null)
     var exams by mutableStateOf<List<com.ncepu.jw.data.Exam>>(emptyList())
+
+    // 慧生活798 饮水机
+    val ilife = IlifeClient()
+    var waterState by mutableStateOf(WaterUiState())
+    var waterPhone by mutableStateOf("")
+    var waterSmsCode by mutableStateOf("")
+    var waterCaptchaInput by mutableStateOf("")
+    private var waterToken by mutableStateOf("")
+    private var waterCaptchaKey = IlifeClient.newCaptchaKey()
+
+    fun refreshCaptcha() {
+        waterCaptchaKey = IlifeClient.newCaptchaKey()
+        val url = ilife.captchaUrl(waterCaptchaKey)
+        viewModelScope.launch {
+            val bmp: android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+                runCatching {
+                    val req = okhttp3.Request.Builder().url(url).build()
+                    client2.newCall(req).execute().use { r ->
+                        r.body?.byteStream()?.use { BitmapFactory.decodeStream(it) }
+                    }
+                }.getOrNull()
+            }
+            waterState = waterState.copy(
+                captchaKey = waterCaptchaKey,
+                captchaBmp = bmp?.asImageBitmap(),
+            )
+        }
+    }
+
+    fun sendWaterSms() {
+        waterState = waterState.copy(loading = true, message = null)
+        viewModelScope.launch {
+            val r = ilife.sendSms(waterPhone.trim(), waterCaptchaInput.trim(), waterCaptchaKey)
+            waterState = waterState.copy(
+                loading = false,
+                message = if (r.ok) "短信已发送" else "发送失败:${IlifeClient.readable(r.code, r.msg)}",
+            )
+        }
+    }
+
+    fun doWaterLogin() {
+        waterState = waterState.copy(loading = true, message = null)
+        viewModelScope.launch {
+            val r = ilife.login(waterPhone.trim(), waterSmsCode.trim())
+            if (r.ok) {
+                waterToken = ilife.extractToken(r.json ?: JSONObject())
+                settings.waterToken = waterToken
+                waterState = waterState.copy(loggedIn = waterToken.isNotBlank(), loading = false)
+                loadWaterDevices()
+            } else {
+                waterState = waterState.copy(
+                    loading = false,
+                    message = "登录失败:${IlifeClient.readable(r.code, r.msg)}",
+                )
+            }
+        }
+    }
+
+    fun loadWaterDevices() {
+        if (waterToken.isBlank()) waterToken = settings.waterToken
+        if (waterToken.isBlank()) return
+        waterState = waterState.copy(loggedIn = true, loading = true, message = null)
+        viewModelScope.launch {
+            try {
+                val devs = ilife.devices(waterToken)
+                waterState = waterState.copy(
+                    devices = devs.map { Triple(it.first, it.second, false) },
+                    loading = false,
+                    message = if (devs.isEmpty()) "暂无收藏设备" else null,
+                )
+            } catch (e: Exception) {
+                waterState = waterState.copy(loading = false, message = "加载失败:${e.message}")
+            }
+        }
+    }
+
+    fun startWaterDevice(did: String) {
+        viewModelScope.launch {
+            val r = ilife.start(waterToken, did)
+            waterState = waterState.copy(
+                message = if (r.ok) "设备已启动,请接水" else "启动失败:${IlifeClient.readable(r.code, r.msg)}",
+                devices = waterState.devices.map {
+                    if (it.first == did) Triple(it.first, it.second, r.ok) else it
+                },
+            )
+        }
+    }
+
+    fun endWaterDevice(did: String) {
+        viewModelScope.launch {
+            val r = ilife.end(waterToken, did)
+            waterState = waterState.copy(
+                message = if (r.ok) "已结束出水" else "结束失败:${IlifeClient.readable(r.code, r.msg)}",
+                devices = waterState.devices.map {
+                    if (it.first == did) Triple(it.first, it.second, false) else it
+                },
+            )
+        }
+    }
 
     fun tryAutoLogin() {
         val creds = settings.loadCredentials()
@@ -398,7 +503,14 @@ class MainActivity : ComponentActivity() {
                 .isAppearanceLightStatusBars = !isDarkNow
         }
 
-        LaunchedEffect(Unit) { vm.tryAutoLogin() }
+        LaunchedEffect(Unit) {
+            vm.tryAutoLogin()
+            if (vm.settings.waterToken.isNotBlank()) {
+                vm.loadWaterDevices()
+            } else {
+                vm.refreshCaptcha()
+            }
+        }
 
         val notifPermLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission(),
@@ -487,6 +599,7 @@ class MainActivity : ComponentActivity() {
                                 navController.navigate("pyfa")
                             },
                             onOpenExams = { navController.navigate("exams") },
+                            onOpenWater = { navController.navigate("water") },
                             onEvaluate = {
                                 WebViewActivity.webSession = vm.client.cookieHeader()
                                 evalLauncher.launch(
@@ -519,6 +632,23 @@ class MainActivity : ComponentActivity() {
                             error = vm.pyfaError,
                             data = vm.pyfa,
                             onRetry = { vm.loadPyfa() },
+                        )
+                    }
+                    composable("water") {
+                        WaterScreen(
+                            state = vm.waterState,
+                            phone = vm.waterPhone,
+                            smsCode = vm.waterSmsCode,
+                            captchaInput = vm.waterCaptchaInput,
+                            onPhoneChange = { vm.waterPhone = it },
+                            onSmsCodeChange = { vm.waterSmsCode = it },
+                            onCaptchaInputChange = { vm.waterCaptchaInput = it },
+                            onSendSms = { vm.sendWaterSms() },
+                            onLogin = { vm.doWaterLogin() },
+                            onRefreshDevices = { vm.loadWaterDevices() },
+                            onStartDevice = { vm.startWaterDevice(it) },
+                            onEndDevice = { vm.endWaterDevice(it) },
+                            onBack = { navController.popBackStack() },
                         )
                     }
                     composable("exams") {
@@ -646,6 +776,7 @@ class MainActivity : ComponentActivity() {
         onOpenSettings: () -> Unit,
         onOpenPyfa: () -> Unit,
         onOpenExams: () -> Unit,
+        onOpenWater: () -> Unit,
         onEvaluate: () -> Unit,
         onEnterRound: (com.ncepu.jw.data.XkRound) -> Unit,
     ) {
@@ -784,6 +915,7 @@ class MainActivity : ComponentActivity() {
                                 name = vm.name,
                                 onOpenSettings = onOpenSettings,
                                 onOpenPyfa = onOpenPyfa,
+                                onOpenWater = onOpenWater,
                                 onLogout = {
                                     vm.settings.clearCredentials()
                                     vm.logout()

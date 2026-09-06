@@ -42,6 +42,7 @@ class SettingsStore(context: Context) {
         const val KEY_TIMES = "section_times"
         const val KEY_WEEK_START = "week_start_millis" // 第一周周一 00:00
         const val KEY_COURSE_CACHE = "course_cache"
+        const val KEY_WATER_TOKEN = "water_token"
         const val KEY_EXAM_CACHE = "exam_cache"
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
@@ -170,6 +171,12 @@ class SettingsStore(context: Context) {
         backgroundFile()?.delete()
         prefs.edit().remove(KEY_BG).apply()
     }
+
+    // ---------- 慧生活798(饮水机) ----------
+
+    var waterToken: String
+        get() = prefs.getString(KEY_WATER_TOKEN, null) ?: ""
+        set(v) = prefs.edit().putString(KEY_WATER_TOKEN, v).apply()
 
     // ---------- 登录凭据 ----------
 

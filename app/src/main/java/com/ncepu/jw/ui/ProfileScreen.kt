@@ -30,6 +30,7 @@ fun ProfileScreen(
     name: String?,
     onOpenSettings: () -> Unit,
     onOpenPyfa: () -> Unit,
+    onOpenWater: () -> Unit,
     onLogout: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
@@ -66,6 +67,7 @@ fun ProfileScreen(
         }
 
         // 功能入口
+        EntryCard("饮水机", onOpenWater)
         EntryCard("培养方案", onOpenPyfa)
         EntryCard("设置", onOpenSettings)
 
