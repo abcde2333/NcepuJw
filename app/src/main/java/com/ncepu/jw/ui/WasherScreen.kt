@@ -203,7 +203,7 @@ fun WasherScreen(
                                 Column(Modifier.padding(12.dp)) {
                                     Text("2. 选择洗涤模式并下单", fontWeight = FontWeight.Bold)
                                     Spacer(Modifier.height(6.dp))
-                                    state.models.forEach { (id, name, price) ->
+                                    state.models.forEach { (id, name, extra) ->
                                         Row(
                                             Modifier
                                                 .fillMaxWidth()
@@ -213,7 +213,7 @@ fun WasherScreen(
                                         ) {
                                             Text(name, Modifier.weight(1f))
                                             Text(
-                                                if (price.isNotBlank()) "¥$price" else "",
+                                                extra,
                                                 color = MaterialTheme.colorScheme.primary,
                                             )
                                         }

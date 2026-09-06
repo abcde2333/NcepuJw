@@ -169,7 +169,7 @@ class UjingClient {
         deviceTypeId: Int,
         storeId: String,
         washModelId: Int,
-        temperatureId: Int,
+        temperatureId: Int = 1,
     ): Result = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("type", 1)

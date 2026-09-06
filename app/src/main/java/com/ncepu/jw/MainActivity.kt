@@ -370,10 +370,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             washerState = washerState.copy(message = "请先识别设备")
             return
         }
-        val model = washerState.models.firstOrNull() ?: return
+        val model = washerState.models.firstOrNull { it.first == 1 } ?: washerState.models.firstOrNull() ?: return
         washerState = washerState.copy(loading = true, message = null)
         viewModelScope.launch {
-            val r = ujing.createOrder(washerToken, deviceId, scanned.first, scanned.second, model.first, model.first)
+            val r = ujing.createOrder(washerToken, deviceId, scanned.first, scanned.second, model.first, temperatureId = 1)
             if (!r.ok) {
                 washerState = washerState.copy(loading = false, message = "下单失败:" + UjingClient.readable(r.code, r.msg))
                 return@launch
