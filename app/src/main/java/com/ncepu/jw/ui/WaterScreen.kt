@@ -75,8 +75,11 @@ fun WaterScreen(
     onRefreshDevices: () -> Unit,
     onStartDevice: (String) -> Unit,
     onEndDevice: (String) -> Unit,
+    onAddDevice: (String, String) -> Unit,
+    onRemoveDevice: (String) -> Unit,
     onBack: () -> Unit,
 ) {
+    var showAddDialog by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -197,6 +200,9 @@ fun WaterScreen(
                     TextButton(onClick = onRefreshDevices, enabled = !state.loading) {
                         Text("刷新")
                     }
+                    TextButton(onClick = { showAddDialog = true }) {
+                        Text("添加")
+                    }
                 }
                 state.message?.let {
                     Text(
@@ -225,7 +231,8 @@ fun WaterScreen(
                             Card(
                                 Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                                    .clickable { } ,
                             ) {
                                 Row(
                                     Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -260,11 +267,74 @@ fun WaterScreen(
                                             .padding(8.dp),
                                     )
                                 }
+                                Text(
+                                    "移除",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier
+                                        .align(Alignment.End)
+                                        .clickable { onRemoveDevice(did) }
+                                        .padding(horizontal = 16.dp, vertical = 2.dp),
+                                )
                             }
                         }
                     }
                 }
             }
+
+            if (showAddDialog) {
+                AddDeviceDialog(
+                    onDismiss = { showAddDialog = false },
+                    onConfirm = { did, name ->
+                        showAddDialog = false
+                        onAddDevice(did.trim(), name.trim())
+                    },
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun AddDeviceDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit,
+) {
+    var did by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf("") }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加设备") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = did,
+                    onValueChange = { did = it },
+                    label = { Text("设备编号(did)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("备注名称(可选)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "设备编号可在慧生活798 App 的设备详情或机身二维码中查看",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { if (did.isNotBlank()) onConfirm(did, name) }, enabled = did.isNotBlank()) {
+                Text("添加")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }

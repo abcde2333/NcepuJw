@@ -25,12 +25,17 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.Button
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.CompositionLocalProvider
@@ -39,8 +44,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.asImageBitmap
@@ -48,6 +56,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -152,6 +161,17 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var waterCaptchaInput by mutableStateOf("")
     private var waterToken by mutableStateOf("")
     private var waterCaptchaKey = IlifeClient.newCaptchaKey()
+    var skippedLogin by mutableStateOf(false)   // 跳过教务登录(离线/仅用饮水机)
+
+    fun addWaterDevice(did: String, name: String) {
+        settings.addWaterDevice(did, name)
+        loadWaterDevices()
+    }
+
+    fun removeWaterDevice(did: String) {
+        settings.removeWaterDevice(did)
+        loadWaterDevices()
+    }
 
     fun refreshCaptcha() {
         waterCaptchaKey = IlifeClient.newCaptchaKey()
@@ -207,11 +227,21 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         waterState = waterState.copy(loggedIn = true, loading = true, message = null)
         viewModelScope.launch {
             try {
-                val devs = ilife.devices(waterToken)
+                val remote = try { ilife.devices(waterToken) } catch (_: Exception) { emptyList() }
+                // 合并手动添加的设备(不覆盖远程)
+                val manual = settings.waterDevices.filter { m -> remote.none { it.first == m.first } }
+                val all = (remote + manual).ifEmpty {
+                    // 远程失败且无手动设备时仍显示手动设备
+                    manual
+                }
+                val merged = all.map { (did, name) ->
+                    val prev = waterState.devices.firstOrNull { it.first == did }
+                    Triple(did, name, prev?.third ?: false)
+                }
                 waterState = waterState.copy(
-                    devices = devs.map { Triple(it.first, it.second, false) },
+                    devices = merged,
                     loading = false,
-                    message = if (devs.isEmpty()) "暂无收藏设备" else null,
+                    message = if (merged.isEmpty()) "暂无设备,可手动添加" else null,
                 )
             } catch (e: Exception) {
                 waterState = waterState.copy(loading = false, message = "加载失败:${e.message}")
@@ -244,6 +274,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 
     fun tryAutoLogin() {
+        if (skippedLogin) return
         val creds = settings.loadCredentials()
         if (creds != null && !loggedIn) {
             account = creds.first; password = creds.second
@@ -426,6 +457,34 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 }
 
+/** 跳过教务登录后的提示页 */
+@Composable
+private fun SkippedNotice(onGoLogin: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+    ) {
+        Text("已跳过教务登录", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.padding(8.dp))
+        Text(
+            "课表、成绩等教务功能需要登录后使用\n饮水机功能可在底部“饮水”标签直接使用\n如校外使用教务，请先连接 EasyConnect",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            lineHeight = 20.sp,
+        )
+        Spacer(Modifier.padding(20.dp))
+        androidx.compose.material3.Button(onClick = onGoLogin) {
+            Text("去登录教务系统")
+        }
+    }
+}
+
+object NcepuAppHolder {
+    var requestLogin by mutableStateOf(false)
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -504,11 +563,19 @@ class MainActivity : ComponentActivity() {
         }
 
         LaunchedEffect(Unit) {
-            vm.tryAutoLogin()
-            if (vm.settings.waterToken.isNotBlank()) {
+            if (!vm.skippedLogin) vm.tryAutoLogin()
+            if (vm.settings.waterToken.isNotBlank() || vm.skippedLogin) {
                 vm.loadWaterDevices()
             } else {
                 vm.refreshCaptcha()
+            }
+        }
+
+        // "去登录教务系统":清除跳过标记,回到登录页
+        LaunchedEffect(NcepuAppHolder.requestLogin) {
+            if (NcepuAppHolder.requestLogin) {
+                NcepuAppHolder.requestLogin = false
+                vm.skippedLogin = false
             }
         }
 
@@ -565,6 +632,10 @@ class MainActivity : ComponentActivity() {
                     onAccountChange = { vm.account = it },
                     onPasswordChange = { vm.password = it },
                     onLogin = { vm.doLogin() },
+                    onSkip = {
+                        vm.skippedLogin = true
+                        vm.loadWaterDevices()
+                    },
                 )
             } else {
                 NavHost(
@@ -600,6 +671,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpenExams = { navController.navigate("exams") },
                             onOpenWater = { navController.navigate("water") },
+                            onOpenGradesNav = { navController.navigate("grades") },
                             onEvaluate = {
                                 WebViewActivity.webSession = vm.client.cookieHeader()
                                 evalLauncher.launch(
@@ -648,6 +720,8 @@ class MainActivity : ComponentActivity() {
                             onRefreshDevices = { vm.loadWaterDevices() },
                             onStartDevice = { vm.startWaterDevice(it) },
                             onEndDevice = { vm.endWaterDevice(it) },
+                            onAddDevice = { did, name -> vm.addWaterDevice(did, name) },
+                            onRemoveDevice = { did -> vm.removeWaterDevice(did) },
                             onBack = { navController.popBackStack() },
                         )
                     }
@@ -660,6 +734,29 @@ class MainActivity : ComponentActivity() {
                             exams = vm.exams,
                             onSemesterChange = { vm.examSem = it; vm.loadExams() },
                             onRetry = { vm.loadExams() },
+                        )
+                    }
+                    composable("grades") {
+                        GradeScreen(
+                            semesters = vm.semesters,
+                            selected = vm.gradeSem,
+                            loading = vm.gradeLoading,
+                            error = vm.gradeError,
+                            grades = vm.grades,
+                            onSemesterChange = { vm.gradeSem = it; vm.loadGrades() },
+                            onRetry = { vm.loadGrades() },
+                            onEvaluate = {
+                                WebViewActivity.webSession = vm.client.cookieHeader()
+                                evalLauncher.launch(
+                                    Intent(ctx, WebViewActivity::class.java).apply {
+                                        putExtra(
+                                            WebViewActivity.EXTRA_URL,
+                                            JwClient.DEFAULT_BASE + "/jsxsd/newxspj/zhxspj_list.do",
+                                        )
+                                        putExtra(WebViewActivity.EXTRA_TITLE, "教学评价")
+                                    }
+                                )
+                            },
                         )
                     }
                     composable("bgcrop") {
@@ -777,6 +874,7 @@ class MainActivity : ComponentActivity() {
         onOpenPyfa: () -> Unit,
         onOpenExams: () -> Unit,
         onOpenWater: () -> Unit,
+        onOpenGradesNav: () -> Unit,
         onEvaluate: () -> Unit,
         onEnterRound: (com.ncepu.jw.data.XkRound) -> Unit,
     ) {
@@ -843,8 +941,8 @@ class MainActivity : ComponentActivity() {
                         onSelect = { t ->
                             tab = t
                             when (t) {
-                                0 -> if (vm.courses.isEmpty()) vm.loadHomeWeek(null)
-                                1 -> if (vm.grades.isEmpty()) vm.loadGrades()
+                                0 -> if (vm.courses.isEmpty() && !vm.skippedLogin) vm.loadHomeWeek(null)
+                                1 -> vm.loadWaterDevices()
                                 2 -> if (!vm.selectionLoaded) vm.loadSelection()
                             }
                         },
@@ -871,7 +969,7 @@ class MainActivity : ComponentActivity() {
                         label = "tab",
                     ) { t ->
                         when (t) {
-                            0 -> ScheduleScreen(
+                            0 -> if (vm.skippedLogin) SkippedNotice(onGoLogin = { NcepuAppHolder.requestLogin = true }) else ScheduleScreen(
                                 loading = vm.schedLoading,
                                 error = vm.schedError,
                                 courses = vm.courses,
@@ -892,15 +990,22 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onOpenExams = onOpenExams,
                             )
-                            1 -> GradeScreen(
-                                semesters = vm.semesters,
-                                selected = vm.gradeSem,
-                                loading = vm.gradeLoading,
-                                error = vm.gradeError,
-                                grades = vm.grades,
-                                onSemesterChange = { vm.gradeSem = it; vm.loadGrades() },
-                                onRetry = { vm.loadGrades() },
-                                onEvaluate = onEvaluate,
+                            1 -> WaterScreen(
+                                state = vm.waterState,
+                                phone = vm.waterPhone,
+                                smsCode = vm.waterSmsCode,
+                                captchaInput = vm.waterCaptchaInput,
+                                onPhoneChange = { vm.waterPhone = it },
+                                onSmsCodeChange = { vm.waterSmsCode = it },
+                                onCaptchaInputChange = { vm.waterCaptchaInput = it },
+                                onSendSms = { vm.sendWaterSms() },
+                                onLogin = { vm.doWaterLogin() },
+                                onRefreshDevices = { vm.loadWaterDevices() },
+                                onStartDevice = { vm.startWaterDevice(it) },
+                                onEndDevice = { vm.endWaterDevice(it) },
+                                onAddDevice = { did, name -> vm.addWaterDevice(did, name) },
+                                onRemoveDevice = { did -> vm.removeWaterDevice(did) },
+                                onBack = { },
                             )
                             2 -> SelectionScreen(
                                 loading = vm.selLoading,
@@ -916,6 +1021,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenSettings = onOpenSettings,
                                 onOpenPyfa = onOpenPyfa,
                                 onOpenWater = onOpenWater,
+                                onOpenGrades = onOpenGradesNav,
                                 onLogout = {
                                     vm.settings.clearCredentials()
                                     vm.logout()

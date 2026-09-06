@@ -43,6 +43,7 @@ class SettingsStore(context: Context) {
         const val KEY_WEEK_START = "week_start_millis" // 第一周周一 00:00
         const val KEY_COURSE_CACHE = "course_cache"
         const val KEY_WATER_TOKEN = "water_token"
+        const val KEY_WATER_DEVICES = "water_devices"
         const val KEY_EXAM_CACHE = "exam_cache"
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
@@ -177,6 +178,36 @@ class SettingsStore(context: Context) {
     var waterToken: String
         get() = prefs.getString(KEY_WATER_TOKEN, null) ?: ""
         set(v) = prefs.edit().putString(KEY_WATER_TOKEN, v).apply()
+
+    /** 手动添加的饮水设备(did → 名称),存 JSON */
+    var waterDevices: List<Pair<String, String>>
+        get() {
+            val raw = prefs.getString(KEY_WATER_DEVICES, null) ?: return emptyList()
+            return runCatching {
+                val arr = org.json.JSONArray(raw)
+                (0 until arr.length()).mapNotNull { i ->
+                    val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                    o.optString("did") to o.optString("name")
+                }
+            }.getOrDefault(emptyList())
+        }
+        set(v) {
+            val arr = org.json.JSONArray()
+            v.forEach { (did, name) ->
+                arr.put(org.json.JSONObject().put("did", did).put("name", name))
+            }
+            prefs.edit().putString(KEY_WATER_DEVICES, arr.toString()).apply()
+        }
+
+    fun addWaterDevice(did: String, name: String) {
+        val list = waterDevices.filter { it.first != did }.toMutableList()
+        list.add(did to name)
+        waterDevices = list
+    }
+
+    fun removeWaterDevice(did: String) {
+        waterDevices = waterDevices.filter { it.first != did }
+    }
 
     // ---------- 登录凭据 ----------
 

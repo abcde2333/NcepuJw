@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.HowToReg
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -52,7 +53,7 @@ private data class TabSpec(val icon: ImageVector, val label: String)
 
 private val TABS = listOf(
     TabSpec(Icons.Filled.CalendarMonth, "课表"),
-    TabSpec(Icons.Filled.BarChart, "成绩"),
+    TabSpec(Icons.Filled.WaterDrop, "饮水"),
     TabSpec(Icons.Filled.HowToReg, "选课"),
     TabSpec(Icons.Filled.Person, "我的"),
 )
