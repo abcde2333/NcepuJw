@@ -281,6 +281,19 @@ fun ScheduleScreen(
                 label = "week",
             ) { week ->
                 val data = if (mode == "ALL") courses else weekData(week)
+                // 表头日期:以官方当前周锚定今天,再推算所选周各天的日期
+                val weekDates = if (mode == "WEEK" && officialWeek > 0) {
+                    val fmt = SimpleDateFormat("M.d", Locale.US)
+                    val cal = Calendar.getInstance()
+                    val dow = cal.get(Calendar.DAY_OF_WEEK)
+                    cal.add(Calendar.DAY_OF_MONTH, -((dow + 5) % 7)) // 本周一
+                    cal.add(Calendar.DAY_OF_MONTH, (selectedWeek - officialWeek) * 7)
+                    List(7) { i ->
+                        val c = (cal.clone() as Calendar)
+                        c.add(Calendar.DAY_OF_MONTH, i)
+                        fmt.format(c.time)
+                    }
+                } else emptyList()
                 when {
                     data != null -> CourseGrid(
                         courses = data,
@@ -288,6 +301,7 @@ fun ScheduleScreen(
                         selectedWeek = selectedWeek,
                         sectionTimes = sectionTimes,
                         onBackground = bgEnabled,
+                        weekDates = weekDates,
                         onCourseClick = { selectedCourse = it },
                     )
                     error != null && courses.isEmpty() -> Box(
@@ -410,6 +424,7 @@ private fun CourseGrid(
     selectedWeek: Int,
     sectionTimes: List<String>,
     onBackground: Boolean,
+    weekDates: List<String> = emptyList(),
     onCourseClick: (Course) -> Unit,
 ) {
     val slots = remember(sectionTimes) { sectionSlots(sectionTimes) }
@@ -443,11 +458,20 @@ private fun CourseGrid(
                         ),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        label, fontSize = 12.sp,
-                        color = if (i + 1 == todayIdx) MaterialTheme.colorScheme.onPrimary
-                        else MaterialTheme.colorScheme.onSurface,
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            label, fontSize = 12.sp,
+                            color = if (i + 1 == todayIdx) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                        if (weekDates.getOrNull(i)?.isNotBlank() == true) {
+                            Text(
+                                weekDates[i], fontSize = 8.sp,
+                                color = if (i + 1 == todayIdx) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
+                                else MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                    }
                 }
             }
         }
