@@ -9,7 +9,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LocalLaundryService
+import androidx.compose.material.icons.filled.Login
+import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -70,16 +75,16 @@ fun ProfileScreen(
             }
         }
 
-        // 功能入口
+        // 功能入口(独立图标区分)
         if (loggedIn) {
-            EntryCard("成绩查询", onOpenGrades)
+            EntryCard("成绩查询", Icons.Filled.BarChart, onOpenGrades)
         } else {
-            EntryCard("登录教务系统", onOpenJwxtLogin)
+            EntryCard("登录教务系统", Icons.Filled.Login, onOpenJwxtLogin)
         }
-        EntryCard("饮水机", onOpenWater)
-        EntryCard("U净洗衣", onOpenWasher)
-        EntryCard("培养方案", onOpenPyfa)
-        EntryCard("设置", onOpenSettings)
+        EntryCard("饮水机", Icons.Filled.WaterDrop, onOpenWater)
+        EntryCard("U净洗衣", Icons.Filled.LocalLaundryService, onOpenWasher)
+        EntryCard("培养方案", Icons.Filled.MenuBook, onOpenPyfa)
+        EntryCard("设置", Icons.Filled.Settings, onOpenSettings)
 
         InfoRow(Icons.Filled.Info, "数据来源", "华北电力大学教务系统(强智 R4.5)\njwxt.ncepu.edu.cn")
 
@@ -110,7 +115,7 @@ fun ProfileScreen(
 }
 
 @Composable
-private fun EntryCard(label: String, onClick: () -> Unit) {
+private fun EntryCard(label: String, icon: ImageVector, onClick: () -> Unit) {
     Card(
         onClick = onClick,
         modifier = Modifier
@@ -124,7 +129,7 @@ private fun EntryCard(label: String, onClick: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                Icons.Filled.Settings,
+                icon,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary,
             )

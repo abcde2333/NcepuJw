@@ -477,7 +477,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         schedError = null
         viewModelScope.launch {
             try {
-                val full = client.fetchCourses(schedSem)
+                // 主源:XLS 导出(格式规整);失败回退 HTML 页解析
+                val full = try {
+                    client.fetchScheduleXls(schedSem) ?: client.fetchCourses(schedSem)
+                } catch (e: Exception) {
+                    client.fetchCourses(schedSem)
+                }
                 allCourses = full
                 courses = full
                 schedLoaded = true

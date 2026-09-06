@@ -169,6 +169,33 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
         parseScheduleHtml(html)
     }
 
+    /**
+     * 课表 XLS 导出(xskb_print.do,学生个人课表)。
+     * 数据与网页一致但格式规整,解析失败返回 null(调用方回退 HTML)。
+     */
+    suspend fun fetchScheduleXls(sem: Semester): List<Course>? = withContext(Dispatchers.IO) {
+        val form = FormBody.Builder()
+            .add("xnxq01id", sem.key)
+            .add("zc", "")
+            .build()
+        val bytes = client.newCall(
+            baseRequest(baseUrl.toHttpUrl().resolve("/jsxsd/xskb/xskb_print.do?xnxq01id=${sem.key}&zc=")!!)
+                .post(form)
+                .build()
+        ).execute().use { r ->
+            r.body?.bytes()
+        } ?: return@withContext null
+        if (bytes.size < 8) return@withContext null
+        // OLE2 签名 D0 CF 11 E0 = 真正的 XLS;否则是 HTML(错误页/会话失效)
+        if (bytes[0] == 0xD0.toByte() && bytes[1] == 0xCF.toByte()) {
+            ScheduleXlsParser.parse(bytes)
+        } else {
+            val text = String(bytes, Charsets.UTF_8)
+            if (isSessionLost(text)) throw JwException("会话已失效,请重新登录")
+            null
+        }
+    }
+
     /** 查询成绩(全部学期),调用方按 Grade.term 过滤 */
     suspend fun fetchGrades(sem: Semester): GradesPage = withContext(Dispatchers.IO) {
         // 入口页必须先访问,否则 cjcx_list 返回"出错了"页
