@@ -67,6 +67,7 @@ fun WaterScreen(
     phone: String,
     smsCode: String,
     captchaInput: String,
+    smsCooldown: Int = 0,
     onPhoneChange: (String) -> Unit,
     onSmsCodeChange: (String) -> Unit,
     onCaptchaInputChange: (String) -> Unit,
@@ -83,6 +84,10 @@ fun WaterScreen(
     onBack: () -> Unit,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
+    // 扫码返回:自动弹出添加对话框并回填设备编号
+    LaunchedEffect(scanResult) {
+        if (!scanResult.isNullOrBlank()) showAddDialog = true
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -161,9 +166,10 @@ fun WaterScreen(
                         Spacer(Modifier.width(10.dp))
                         Button(
                             onClick = onSendSms,
-                            enabled = !state.loading && phone.length == 11 && captchaInput.isNotBlank(),
+                            enabled = smsCooldown <= 0 && !state.loading &&
+                                phone.length == 11 && captchaInput.isNotBlank(),
                         ) {
-                            Text("发送")
+                            Text(if (smsCooldown > 0) "重发(${smsCooldown}s)" else "发送")
                         }
                     }
                     Button(
@@ -294,6 +300,11 @@ fun WaterScreen(
             if (showAddDialog) {
                 AddDeviceDialog(
                     initialDid = scanResult,
+                    onScan = {
+                        // 关闭对话框 → 进扫码页;扫完 LaunchedEffect 会再次弹窗回填
+                        showAddDialog = false
+                        onScan()
+                    },
                     onDismiss = { showAddDialog = false },
                     onConfirm = { did, name ->
                         showAddDialog = false
@@ -312,7 +323,8 @@ private fun AddDeviceDialog(
     onDismiss: () -> Unit,
     onConfirm: (String, String) -> Unit,
 ) {
-    var did by remember { mutableStateOf(initialDid ?: "") }
+    // keyed by initialDid:扫码回填时重新初始化
+    var did by remember(initialDid) { mutableStateOf(initialDid ?: "") }
     var name by remember { mutableStateOf("") }
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,

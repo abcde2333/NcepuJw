@@ -50,7 +50,8 @@ data class WasherUiState(
     val smsSent: Boolean = false,
     val scannedDevice: String? = null,       // deviceId(扫码/手输后)
     val deviceSummary: String = "",          // 设备名/门店摘要
-    val models: List<Triple<Int, String, String>> = emptyList(), // id, 名称, 价格
+    val models: List<Triple<Int, String, String>> = emptyList(), // workModelId, 名称, 价格
+    val selectedModelId: Int? = null,        // 当前选中的洗涤模式
     val currentOrder: WasherOrderInfo? = null,
     val payUrl: String = "",                 // 支付宝收银台参数(orderInfo),展示给用户跳转
     val savedWashers: List<Pair<String, String>> = emptyList(), // 已保存洗衣机(did, deviceNo)
@@ -63,6 +64,7 @@ fun WasherScreen(
     state: WasherUiState,
     phone: String,
     smsCode: String,
+    smsCooldown: Int = 0,
     onPhoneChange: (String) -> Unit,
     onSmsCodeChange: (String) -> Unit,
     onSendSms: () -> Unit,
@@ -121,9 +123,11 @@ fun WasherScreen(
                     )
                     Button(
                         onClick = onSendSms,
-                        enabled = !state.loading && phone.length == 11,
+                        enabled = smsCooldown <= 0 && !state.loading && phone.length == 11,
                         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                    ) { Text("发送验证码") }
+                    ) {
+                        Text(if (smsCooldown > 0) "重新发送(${smsCooldown}s)" else "发送验证码")
+                    }
                     Button(
                         onClick = onLogin,
                         enabled = !state.loading && phone.length == 11 && smsCode.isNotBlank(),
@@ -211,6 +215,10 @@ fun WasherScreen(
                                                 .padding(vertical = 8.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
+                                            Text(
+                                                if (state.selectedModelId == id) "● " else "○ ",
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
                                             Text(name, Modifier.weight(1f))
                                             Text(
                                                 extra,

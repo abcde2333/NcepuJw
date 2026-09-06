@@ -159,6 +159,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var washerState by mutableStateOf(WasherUiState())
     var washerPhone by mutableStateOf("")
     var washerSmsCode by mutableStateOf("")
+    var washerSmsCooldown by mutableStateOf(0)   // 短信发送冷却(秒)
     private var washerToken by mutableStateOf("")
     private val washerScanned = mutableMapOf<String, Pair<Int, String>>() // deviceId → (deviceTypeId, storeId)
 
@@ -168,13 +169,26 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var waterPhone by mutableStateOf("")
     var waterSmsCode by mutableStateOf("")
     var waterCaptchaInput by mutableStateOf("")
+    var waterSmsCooldown by mutableStateOf(0)    // 短信发送冷却(秒)
     var waterScanResult by mutableStateOf<String?>(null)
     private var waterToken by mutableStateOf("")
     private var waterCaptchaKey = IlifeClient.newCaptchaKey()
     var skippedLogin by mutableStateOf(false)   // 跳过教务登录(离线/仅用饮水机)
 
+    init {
+        // 冷却倒计时(饮水/洗衣机短信共用)
+        viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(1000)
+                if (waterSmsCooldown > 0) waterSmsCooldown--
+                if (washerSmsCooldown > 0) washerSmsCooldown--
+            }
+        }
+    }
+
     fun addWaterDevice(did: String, name: String) {
         settings.addWaterDevice(did, name)
+        waterScanResult = null
         loadWaterDevices()
     }
 
@@ -203,9 +217,11 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 
     fun sendWaterSms() {
+        if (waterSmsCooldown > 0) return
         waterState = waterState.copy(loading = true, message = null)
         viewModelScope.launch {
             val r = ilife.sendSms(waterPhone.trim(), waterCaptchaInput.trim(), waterCaptchaKey)
+            if (r.ok) waterSmsCooldown = 60
             waterState = waterState.copy(
                 loading = false,
                 message = if (r.ok) "短信已发送" else "发送失败:${IlifeClient.readable(r.code, r.msg)}",
@@ -294,9 +310,11 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 
     fun washerRequestCaptcha() {
+        if (washerSmsCooldown > 0) return
         washerState = washerState.copy(loading = true, message = null)
         viewModelScope.launch {
             val r = ujing.requestCaptcha(washerPhone.trim())
+            if (r.ok) washerSmsCooldown = 60
             washerState = washerState.copy(
                 loading = false,
                 message = if (r.ok) "验证码已发送" else "发送失败:" + UjingClient.readable(r.code, r.msg),
@@ -309,7 +327,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val r = ujing.login(washerPhone.trim(), washerSmsCode.trim())
             if (r.ok) {
-                washerToken = ujing.extractToken(r.json ?: org.json.JSONObject())
+                washerToken = ujing.extractToken(r.json)
                 settings.washerToken = washerToken
                 washerState = washerState.copy(
                     loggedIn = washerToken.isNotBlank(),
@@ -327,42 +345,61 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     fun washerScan(qrRaw: String) {
         if (washerToken.isBlank()) {
-            washerState = washerState.copy(message = "请先登录")
+            washerState = washerState.copy(message = "请先登录 U净账号")
+            return
+        }
+        val content = qrRaw.trim()
+        if (content.isBlank()) {
+            washerState = washerState.copy(message = "二维码内容为空")
             return
         }
         washerState = washerState.copy(loading = true, message = null)
         viewModelScope.launch {
             try {
-                val scan = ujing.scanWasher(washerToken, qrRaw)
+                // scanWasherCode 必须收到二维码原始内容(服务端自行解析)
+                val scan = ujing.scanWasher(washerToken, content)
                 if (!scan.ok) {
                     washerState = washerState.copy(loading = false, message = "识别失败:" + UjingClient.readable(scan.code, scan.msg))
                     return@launch
                 }
+                // scan.json 已是 data 层;设备信息在 data.result
                 val result = scan.json?.optJSONObject("result") ?: org.json.JSONObject()
                 val deviceId = result.optString("deviceId", "")
                 val enabled = result.optBoolean("createOrderEnabled", false)
                 val reason = result.optString("reason", "")
-                if (!enabled) {
-                    washerState = washerState.copy(loading = false, message = "该设备不可下单:" + reason.ifBlank { "未知原因" })
+                val status = result.optString("status", "")
+                if (deviceId.isBlank()) {
+                    washerState = washerState.copy(loading = false, message = "未识别到设备编号,请确认扫的是洗衣机机身码")
                     return@launch
                 }
+                if (!enabled) {
+                    washerState = washerState.copy(
+                        loading = false,
+                        message = "该设备暂不可下单" + (if (reason.isNotBlank()) ":$reason" else "") +
+                            (if (status.isNotBlank()) "(状态 $status)" else ""),
+                    )
+                    return@launch
+                }
+                // 下单必需的 deviceTypeId 来自扫码结果(非套餐接口)
+                val deviceTypeId = result.optInt("deviceTypeId", 0)
                 val info = ujing.programInfo(washerToken, deviceId)
                 if (!info.ok) {
                     washerState = washerState.copy(loading = false, message = "套餐获取失败:" + UjingClient.readable(info.code, info.msg))
                     return@launch
                 }
                 val storeId = info.json?.optString("storeId", "") ?: ""
-                val deviceTypeId = info.json?.optInt("deviceTypeId", 0) ?: 0
                 washerScanned[deviceId] = Pair(deviceTypeId, storeId)
                 // 记住这台设备(下次免扫码)
                 settings.addWasherDevice(deviceId, info.json?.optString("deviceNo", "") ?: "")
                 washerState = washerState.copy(savedWashers = settings.washerDevices)
-                val models = UjingClient.Parsers.parseModels(info.json ?: org.json.JSONObject())
+                val models = UjingClient.Parsers.parseModels(info.json)
                 washerState = washerState.copy(
                     loading = false,
                     scannedDevice = deviceId,
-                    deviceSummary = (info.json?.optString("storeName", "") ?: "") + " " + (info.json?.optString("deviceTypeName", "") ?: ""),
+                    deviceSummary = (info.json?.optString("storeName", "") ?: "") + " " +
+                        (info.json?.optString("deviceTypeName", "") ?: ""),
                     models = models,
+                    selectedModelId = UjingClient.Parsers.defaultModelId(models),
                     message = null,
                 )
             } catch (e: Exception) {
@@ -378,7 +415,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             washerState = washerState.copy(message = "请先识别设备")
             return
         }
-        val model = washerState.models.firstOrNull { it.first == 1 } ?: washerState.models.firstOrNull() ?: return
+        val model = washerState.models.firstOrNull { it.first == washerState.selectedModelId }
+            ?: washerState.models.firstOrNull { it.first == 1 }
+            ?: washerState.models.firstOrNull()
+            ?: return
         washerState = washerState.copy(loading = true, message = null)
         viewModelScope.launch {
             val r = ujing.createOrder(washerToken, deviceId, scanned.first, scanned.second, model.first, temperatureId = 1)
@@ -388,7 +428,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             }
             val orderId = r.json?.optString("orderId", "") ?: ""
             val detail = ujing.orderDetail(washerToken, orderId)
-            val order = UjingClient.Parsers.parseOrder(detail.json ?: org.json.JSONObject())
+            val order = UjingClient.Parsers.parseOrder(detail.json)
             washerState = washerState.copy(loading = false, currentOrder = order)
         }
     }
@@ -429,7 +469,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         washerState = washerState.copy(loading = true)
         viewModelScope.launch {
             val d = ujing.orderDetail(washerToken, order.orderId)
-            washerState = washerState.copy(loading = false, currentOrder = UjingClient.Parsers.parseOrder(d.json ?: org.json.JSONObject()))
+            washerState = washerState.copy(loading = false, currentOrder = UjingClient.Parsers.parseOrder(d.json))
         }
     }
 
@@ -442,7 +482,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 
     fun refreshWasherSaved() {
-        washerState = washerState.copy(savedWashers = settings.washerDevices)
+        // 恢复已保存的登录态(重启后免登录)
+        if (washerToken.isBlank()) washerToken = settings.washerToken
+        washerState = washerState.copy(
+            loggedIn = washerToken.isNotBlank(),
+            savedWashers = settings.washerDevices,
+        )
     }
 
     fun startWaterDevice(did: String) {
@@ -889,6 +934,8 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     composable("washer") {
+                        // 每次进入洗衣页时恢复已保存的登录态与设备列表
+                        androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshWasherSaved() }
                         WasherScreen(
                             state = vm.washerState,
                             onRemoveWasher = { did ->
@@ -899,13 +946,16 @@ class MainActivity : ComponentActivity() {
                             },
                             phone = vm.washerPhone,
                             smsCode = vm.washerSmsCode,
+                            smsCooldown = vm.washerSmsCooldown,
                             onPhoneChange = { vm.washerPhone = it },
                             onSmsCodeChange = { vm.washerSmsCode = it },
                             onSendSms = { vm.washerRequestCaptcha() },
                             onLogin = { vm.doWasherLogin() },
                             onScanOrInput = { vm.washerScan(it) },
                             onScan = { navController.navigate("washerscan") },
-                            onSelectModel = { _, _ -> },
+                            onSelectModel = { id, _ ->
+                                vm.washerState = vm.washerState.copy(selectedModelId = id)
+                            },
                             onCreateOrder = { vm.washerCreateOrder() },
                             onPay = { vm.washerPay() },
                             onRefreshOrder = { vm.washerRefresh() },
@@ -916,7 +966,8 @@ class MainActivity : ComponentActivity() {
                     composable("washerscan") {
                         WaterScanScreen(
                             onResult = { raw ->
-                                vm.washerScan(WaterDeviceIdParser.normalize(raw))
+                                // scanWasherCode 需要二维码原始内容,这里不做归一化
+                                vm.washerScan(raw)
                                 navController.popBackStack()
                             },
                             onCancel = { navController.popBackStack() },
@@ -928,6 +979,7 @@ class MainActivity : ComponentActivity() {
                             phone = vm.waterPhone,
                             smsCode = vm.waterSmsCode,
                             captchaInput = vm.waterCaptchaInput,
+                            smsCooldown = vm.waterSmsCooldown,
                             onPhoneChange = { vm.waterPhone = it },
                             onSmsCodeChange = { vm.waterSmsCode = it },
                             onCaptchaInputChange = { vm.waterCaptchaInput = it },
@@ -1118,7 +1170,8 @@ class MainActivity : ComponentActivity() {
         onEvaluate: () -> Unit,
         onEnterRound: (com.ncepu.jw.data.XkRound) -> Unit,
     ) {
-        var tab by remember { mutableStateOf(0) }
+        // rememberSaveable:进扫码等子路由时 main 离开组合,返回后需恢复所选 tab(否则回到课表)
+        var tab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
         val ctx = LocalContext.current
 
         // 背景层:View 容器常驻渲染树(背景图 + 暗化一体),同时是液态玻璃底栏的折射源。
@@ -1231,6 +1284,7 @@ class MainActivity : ComponentActivity() {
                                 phone = vm.waterPhone,
                                 smsCode = vm.waterSmsCode,
                                 captchaInput = vm.waterCaptchaInput,
+                                smsCooldown = vm.waterSmsCooldown,
                                 onPhoneChange = { vm.waterPhone = it },
                                 onSmsCodeChange = { vm.waterSmsCode = it },
                                 onCaptchaInputChange = { vm.waterCaptchaInput = it },

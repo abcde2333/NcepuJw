@@ -17,8 +17,13 @@ import java.util.concurrent.TimeUnit
  * 认证:手机号 + 短信验证码(GET captcha → POST login)→ Bearer token
  * 必带头:x-app-code(ZA=账号 / BA=业务)、x-app-version、x-mobile-model 等
  *
- * 洗衣链路:POST devices/scanWasherCode(扫码) → GET app/washer/devices/program/info(套餐)
- *          → POST orders/create(下单) → GET payment/arguments(支付宝参数,App 外支付)
+ * 响应壳:顶层 {code, message, data}。code!=0 为业务错误(message 字段);
+ * 成功时 data 层才是有效负载 — send() 直接剥掉外壳返回 data 层,
+ * 与 FlandreSY 的 transport 行为一致(所有调用方拿到的 json 均为 data 层)。
+ *
+ * 洗衣链路:POST devices/scanWasherCode(扫码,qrCode 传原始二维码内容!)
+ *          → GET app/washer/devices/program/info(套餐)
+ *          → POST orders/create(下单) → GET payment/arguments(支付宝参数)
  *          → GET orders/{id}/detail(状态) → GET orders/{id}/control/start|stop(启停)
  */
 class UjingClient {
@@ -41,6 +46,7 @@ class UjingClient {
 
         /** 订单状态 → 中文(常见值) */
         fun statusText(status: String): String = when (status) {
+            "0" -> "已创建"
             "10" -> "待支付"
             "20" -> "已支付,待启动"
             "30" -> "准备中"
@@ -48,6 +54,13 @@ class UjingClient {
             "50" -> "已完成"
             "60" -> "已取消"
             else -> "状态 $status"
+        }
+
+        /** 分 → "1.50" */
+        fun fen2yuan(fen: Int): String {
+            val neg = fen < 0
+            val a = kotlin.math.abs(fen)
+            return (if (neg) "-" else "") + (a / 100) + "." + ((a % 100) / 10) + (a % 10)
         }
     }
 
@@ -58,6 +71,7 @@ class UjingClient {
 
     private val cookies = mutableMapOf<String, String>()
 
+    /** json = 响应 data 层(失败时为 null) */
     data class Result(val code: Int, val msg: String, val json: JSONObject?) {
         val ok: Boolean get() = code == 0
     }
@@ -105,8 +119,12 @@ class UjingClient {
             }
             val text = resp.body?.string().orEmpty()
             val json = try { JSONObject(text) } catch (_: Exception) { null }
-            if (json != null) Result(json.optInt("code", -999), json.optString("msg", ""), json)
-            else Result(-999, "HTTP ${resp.code}", null)
+            if (json == null) return@use Result(-999, "HTTP ${resp.code}", null)
+            val code = json.optInt("code", -999)
+            val msg = json.optString("message", json.optString("msg", ""))
+            // 对齐 FlandreSY transport:成功时剥壳,只把 data 层交给调用方
+            val data = json.optJSONObject("data")
+            Result(code, msg, if (code == 0) data else null)
         }
     }
 
@@ -121,7 +139,7 @@ class UjingClient {
         )
     }
 
-    /** 短信验证码登录,返回 token */
+    /** 短信验证码登录 */
     suspend fun login(mobile: String, captcha: String): Result = withContext(Dispatchers.IO) {
         send(
             "POST", "login", appCode = "ZA",
@@ -129,23 +147,23 @@ class UjingClient {
         )
     }
 
-    fun extractToken(loginJson: JSONObject): String {
-        val data = loginJson.optJSONObject("data")
-        // FlandreSY:_str(data, 'token') — token 直接在 data 层
-        var t = data?.optString("token", "").orEmpty()
+    /** token 位于 data 层(FlandreSY: _str(data,'token')) */
+    fun extractToken(loginData: JSONObject?): String {
+        if (loginData == null) return ""
+        var t = loginData.optString("token", "").orEmpty()
         if (t.isNotBlank()) return t
-        // 兜底1:data 是字符串(服务端偶发直接回 token 字符串)
-        val dataStr = loginJson.optString("data", "")
-        if (dataStr.isNotBlank() && !dataStr.startsWith("{")) return dataStr
-        // 兜底2:整个响应顶层 token
-        t = loginJson.optString("token", "")
+        // 兜底:有些响应 data 是字符串 token 本身
         return t
     }
 
-    fun extractUserId(loginJson: JSONObject): String =
-        loginJson.optJSONObject("data")?.optString("userId", "").orEmpty()
+    fun extractUserId(loginData: JSONObject?): String =
+        loginData?.optString("userId", "").orEmpty()
 
-    /** 扫码识别洗衣机:POST devices/scanWasherCode {qrCode} */
+    /**
+     * 扫码识别洗衣机:POST devices/scanWasherCode {qrCode}
+     * 注意:qrCode 必须传二维码原始内容(App 内已尽量不改写;手输设备号时也原样传)。
+     * data.result = {deviceId, deviceTypeId, createOrderEnabled, reason, status}
+     */
     suspend fun scanWasher(token: String, qrCode: String): Result = withContext(Dispatchers.IO) {
         send(
             "POST", "devices/scanWasherCode", appCode = "BA",
@@ -210,32 +228,48 @@ class UjingClient {
     }
 
     object Parsers {
-        /** 从套餐 info JSON 提取洗涤模式列表(id/name/price) */
-        fun parseModels(info: JSONObject): List<Triple<Int, String, String>> {
+        /**
+         * 从套餐 info(data 层)提取洗涤模式列表。
+         * 字段:deviceWashModel[] → workModelId / workModelName / basePrice(分) / time(分钟)
+         */
+        fun parseModels(info: JSONObject?): List<Triple<Int, String, String>> {
             val out = mutableListOf<Triple<Int, String, String>>()
-            val arr = info.optJSONArray("washModelList")
-                ?: info.optJSONArray("models")
-                ?: info.optJSONArray("washModels")
-                ?: return out
+            if (info == null) return out
+            val arr = info.optJSONArray("deviceWashModel") ?: return out
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
-                val id = o.optInt("id", o.optInt("washModelId", 0))
-                val name = o.optString("name", o.optString("washModelName", ""))
-                val price = o.optString("price", o.optString("payPrice", ""))
-                if (id != 0 && name.isNotBlank()) out += Triple(id, name, price)
+                val id = o.optInt("workModelId", 0)
+                val name = o.optString("workModelName", "")
+                val fen = o.optInt("basePrice", 0)
+                val minutes = o.optInt("time", 0)
+                if (id != 0 && name.isNotBlank()) {
+                    val price = "¥${fen2yuan(fen)}" + (if (minutes > 0) " · ${minutes}分钟" else "")
+                    out += Triple(id, name, price)
+                }
             }
             return out
         }
 
-        /** 从订单详情 JSON 提取展示字段 */
-        fun parseOrder(detail: JSONObject): WasherOrderInfo = WasherOrderInfo(
-            orderId = detail.str("orderId").ifBlank { detail.str("orderNo") },
-            deviceNo = detail.str("deviceNo"),
-            status = detail.str("status"),
-            statusText = detail.str("statusRemark").ifBlank { statusText(detail.str("status")) },
-            payPrice = detail.optString("payPrice", ""),
-            remainTimeSeconds = detail.optInt("remainTime", 0),
-        )
+        /** 默认套餐:优先 workModelId=1,否则第一个(对齐 legacy defaultWashModelId) */
+        fun defaultModelId(models: List<Triple<Int, String, String>>): Int {
+            if (models.isEmpty()) return 0
+            return (models.firstOrNull { it.first == 1 } ?: models.first()).first
+        }
+
+        /** 从订单详情(data 层)提取展示字段 */
+        fun parseOrder(detail: JSONObject?): WasherOrderInfo {
+            if (detail == null) return WasherOrderInfo("", "", "", "", "", 0)
+            val fen = detail.optInt("payPrice", -1)
+            val pay = if (fen >= 0) fen2yuan(fen) else detail.optString("payPrice", "")
+            return WasherOrderInfo(
+                orderId = detail.str("orderId").ifBlank { detail.str("orderNo") },
+                deviceNo = detail.str("deviceNo"),
+                status = detail.str("status"),
+                statusText = detail.str("statusRemark").ifBlank { statusText(detail.str("status")) },
+                payPrice = pay,
+                remainTimeSeconds = detail.optInt("remainTime", 0),
+            )
+        }
     }
 }
 
