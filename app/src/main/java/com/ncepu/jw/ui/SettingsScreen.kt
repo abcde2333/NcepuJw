@@ -232,18 +232,17 @@ fun SettingsScreen(
                     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                         listOf(
                             NavMaterial.SOLID to "实色",
-                            NavMaterial.LIQUID to "液态玻璃",
                             NavMaterial.BLUR to "高斯模糊",
                         ).forEachIndexed { i, (m, label) ->
                             SegmentedButton(
                                 selected = navMaterial == m,
                                 onClick = { onNavMaterialChange(m) },
-                                shape = SegmentedButtonDefaults.itemShape(i, 3),
+                                shape = SegmentedButtonDefaults.itemShape(i, 2),
                             ) { Text(label) }
                         }
                     }
                     Text(
-                        "液态玻璃/高斯模糊需要 Android 13+,且建议先设置背景图;按住底栏左右滑动可快速切换页面",
+                        "高斯模糊为半透明底,配合背景图的模糊设置使用效果最佳;按住底栏左右滑动可快速切换页面",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(top = 6.dp),

@@ -1183,7 +1183,7 @@ class MainActivity : ComponentActivity() {
         var tab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
         val ctx = LocalContext.current
 
-        // 背景层:View 容器常驻渲染树(背景图 + 暗化一体),同时是液态玻璃底栏的折射源。
+        // 背景层:View 容器常驻渲染树(背景图 + 暗化一体)。
         // 暗化用 FrameLayout 前景实现,必然覆盖全容器(含状态栏/导航条区域)。
         val bgHost = remember { FrameLayout(ctx) }
         val bgImageView = remember { ImageView(ctx) }
@@ -1228,7 +1228,7 @@ class MainActivity : ComponentActivity() {
         }
 
         Box(Modifier.fillMaxSize()) {
-            // 背景容器(最底层;液态玻璃底栏折射它)
+            // 背景容器(最底层)
             androidx.compose.ui.viewinterop.AndroidView(
                 factory = { bgHost },
                 modifier = Modifier.fillMaxSize(),
@@ -1248,9 +1248,7 @@ class MainActivity : ComponentActivity() {
                                 2 -> if (!vm.selectionLoaded) vm.loadSelection()
                             }
                         },
-                        glassTarget = if (showBg) bgHost else null,
                         isDark = isDark,
-                        bgBlurDp = appearance.bgBlur,
                     )
                 },
             ) { padding ->

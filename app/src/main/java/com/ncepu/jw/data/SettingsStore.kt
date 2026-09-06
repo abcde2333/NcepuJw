@@ -11,8 +11,8 @@ enum class ThemeMode { SYSTEM, LIGHT, DARK }
 /** 底部导航栏形状:标准(贴底)/ 悬浮(胶囊) */
 enum class NavBarShape { STANDARD, FLOATING }
 
-/** 底部导航栏材质:实色 / 液态玻璃(真折射)/ 高斯模糊 */
-enum class NavMaterial { SOLID, LIQUID, BLUR }
+/** 底部导航栏材质:实色 / 高斯模糊(半透明+背景模糊) */
+enum class NavMaterial { SOLID, BLUR }
 
 /** 一天的节次起始时间,如 "08:00" 表示第 1 节 8:00 上课 */
 data class SectionTime(val row: Int, val time: String)

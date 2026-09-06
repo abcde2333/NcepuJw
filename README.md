@@ -21,7 +21,7 @@
 ### 外观与体验
 - **Material You 莫奈动态取色**(Android 12+,可关闭回退预设主题色);多套预设配色
 - 深浅色三档(跟随系统/浅色/深色),切换带过渡动画
-- **底栏形态可选**:标准/悬浮,材质支持实色/**液态玻璃**(qmdeve/AndroidLiquidGlass)/**高斯模糊**(实时背景折射)
+- **底栏形态可选**:标准/悬浮,材质支持实色/**高斯模糊**(半透明底,配合背景图模糊)
 - **自定义课表背景图**(拖动 + 双指缩放裁剪),高斯模糊强度、暗化程度可调(暗化覆盖全屏含顶栏底栏)
 - 文本大小、节次上课时间自定义;周起始日设置
 
@@ -147,7 +147,7 @@ app/src/main/java/com/ncepu/jw/
     ├── WaterScanScreen.kt     # 相机扫码(CameraX + ML Kit)
     ├── WasherScreen.kt        # U净洗衣(登录/识别/下单/支付/启停)
     ├── BackgroundCropScreen.kt# 背景图裁剪
-    ├── BottomBar.kt           # 底栏(标准/悬浮 × 实色/液态玻璃/高斯模糊)
+    ├── BottomBar.kt           # 底栏(标准/悬浮 × 实色/高斯模糊)
     ├── SettingsScreen.kt / ProfileScreen.kt / LoginScreen.kt
     └── theme/Theme.kt         # Material You 主题(莫奈取色 + 深浅色)
 ```
@@ -164,4 +164,3 @@ app/src/main/java/com/ncepu/jw/
 - [nocookies111/life-798](https://github.com/nocookies111/life-798) — 慧生活798 协议参考
 - [amamiyakazuki/FlandreSY](https://github.com/amamiyakazuki/FlandreSY) — U净协议参考
 - [YiQiuYes/schedule](https://github.com/YiQiuYes/schedule) — 强智课表接口思路参考
-- [QmDeve/AndroidLiquidGlassView](https://github.com/QmDeve/AndroidLiquidGlassView)、[Kyant0/AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass) — 液态玻璃实现

@@ -12,8 +12,8 @@ android {
         applicationId = "com.ncepu.jw"
         minSdk = 26
         targetSdk = 35
-        versionCode = 41
-        versionName = "4.10"
+        versionCode = 42
+        versionName = "4.11"
     }
 
     buildTypes {
@@ -49,7 +49,6 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.materialkolor:material-kolor:2.0.0")
-    implementation("com.qmdeve.liquidglass:core:1.0.5")
     implementation("com.google.mlkit:barcode-scanning:17.2.0")
     implementation("net.sourceforge.jexcelapi:jxl:2.6.12")
     implementation("androidx.camera:camera-camera2:1.3.4")

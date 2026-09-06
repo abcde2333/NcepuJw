@@ -3,8 +3,6 @@ package com.ncepu.jw.ui
 import android.graphics.RenderEffect
 import android.graphics.Shader
 import android.os.Build
-import android.view.ViewGroup
-import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -43,11 +41,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.ncepu.jw.data.NavBarShape
 import com.ncepu.jw.data.NavMaterial
-import com.qmdeve.liquidglass.Config
-import com.qmdeve.liquidglass.LiquidGlass
 
 private data class TabSpec(val icon: ImageVector, val label: String)
 
@@ -59,9 +54,8 @@ private val TABS = listOf(
 )
 
 /**
- * 底部导航栏:形状(标准/悬浮)× 材质(实色/液态玻璃/高斯模糊)自由组合。
- * 液态玻璃与高斯模糊使用 QmDeve AndroidLiquidGlassView(RenderNode + AGSL 真折射/色散),
- * 需要 Android 13+,低版本回退半透明玻璃质感。
+ * 底部导航栏:形状(标准/悬浮)× 材质(实色/高斯模糊)自由组合。
+ * 高斯模糊为半透明底,配合背景图自身的模糊设置形成毛玻璃观感。
  * 按住底栏左右滑动可快速切换页面。
  */
 @Composable
@@ -70,9 +64,7 @@ fun AppBottomBar(
     material: NavMaterial,
     tab: Int,
     onSelect: (Int) -> Unit,
-    glassTarget: ViewGroup?,
     isDark: Boolean,
-    bgBlurDp: Float,
 ) {
     val density = LocalDensity.current
     var dragAccum by remember { mutableFloatStateOf(0f) }
@@ -134,7 +126,6 @@ fun AppBottomBar(
                                 RoundedCornerShape(26.dp),
                             ),
                     ) {
-                        LiquidGlassLayer(material, glassTarget, isDark, bgBlurDp, density)
                         NavRow(tab, onSelect, Modifier.fillMaxSize())
                     }
                 }
@@ -146,46 +137,8 @@ fun AppBottomBar(
 @Composable
 private fun barColor(material: NavMaterial, isDark: Boolean): Color = when (material) {
     NavMaterial.SOLID -> MaterialTheme.colorScheme.surfaceContainer
-    NavMaterial.LIQUID -> if (isDark) Color(0xFF12181F).copy(alpha = 0.40f)
-                          else Color(0xFFFAFAFA).copy(alpha = 0.40f)
     NavMaterial.BLUR -> if (isDark) Color(0xFF12181F).copy(alpha = 0.30f)
                         else Color(0xFFFAFAFA).copy(alpha = 0.30f)
-}
-
-/** 液态玻璃/高斯模糊材质层(Android 13+ 真折射色散;否则透明回退) */
-@Composable
-private fun LiquidGlassLayer(
-    material: NavMaterial,
-    glassTarget: ViewGroup?,
-    isDark: Boolean,
-    bgBlurDp: Float,
-    density: androidx.compose.ui.unit.Density,
-) {
-    val canRender = glassTarget != null && Build.VERSION.SDK_INT >= 33
-    if (!canRender) return
-    AndroidView(
-        factory = { ctx ->
-            val config = Config().apply {
-                CORNER_RADIUS_PX = with(density) { 26.dp.toPx() }
-                BLUR_RADIUS = with(density) {
-                    (if (material == NavMaterial.LIQUID) 10.dp else (bgBlurDp.coerceAtLeast(12f) + 6f).dp).toPx()
-                }
-                if (material == NavMaterial.LIQUID) {
-                    REFRACTION_HEIGHT = with(density) { 14.dp.toPx() }
-                    REFRACTION_OFFSET = with(density) { 4.dp.toPx() }
-                } else {
-                    REFRACTION_HEIGHT = 0f
-                    REFRACTION_OFFSET = 0f
-                }
-                TINT_ALPHA = if (isDark) 0.22f else 0.10f
-                TINT_COLOR_RED = if (isDark) 0.08f else 1f
-                TINT_COLOR_GREEN = if (isDark) 0.09f else 1f
-                TINT_COLOR_BLUE = if (isDark) 0.12f else 1f
-            }
-            LiquidGlass(ctx, config).apply { init(glassTarget!!) }
-        },
-        modifier = Modifier.fillMaxSize(),
-    )
 }
 
 @Composable
