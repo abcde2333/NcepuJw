@@ -127,16 +127,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var schedSem by mutableStateOf(Semester.current())
     var schedLoading by mutableStateOf(false)
     var schedError by mutableStateOf<String?>(null)
-    var courses by mutableStateOf<List<Course>>(emptyList())
-    var schedMode by mutableStateOf("WEEK")      // WEEK=官方周课表 / ALL=学期全量
-    var officialWeek by mutableStateOf(0)        // 官方当前周(教务系统计算)
-    var selectedWeek by mutableStateOf(0)        // 当前查看的周(0=全部)
-    var loadedWeek by mutableStateOf(-1)         // courses 当前对应的周(过渡动画判定)
-
-    // 周课表缓存:切回已看过的周瞬时显示,不重复请求
-    private val homeCache = mutableMapOf<Int, List<Course>>()
-
-    fun cachedWeek(week: Int): List<Course>? = homeCache[week]
+    var allCourses by mutableStateOf<List<Course>>(emptyList())  // 学期全量(xskb_list.do)
+    var courses by mutableStateOf<List<Course>>(emptyList())     // 当前显示(周视图=本地过滤)
+    var schedMode by mutableStateOf("WEEK")      // WEEK=周视图(本地过滤) / ALL=学期全量
+    var officialWeek by mutableStateOf(0)        // 官方当前周(教务系统计算,加载时取一次)
+    var selectedWeek by mutableStateOf(0)        // 当前查看的周
+    var schedLoaded by mutableStateOf(false)
 
     var gradeSem by mutableStateOf(Semester.current())
     var gradeLoading by mutableStateOf(false)
@@ -458,8 +454,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 loggedIn = true
                 name = client.studentName
                 settings.storeCredentials(account.trim(), password)
-                loadHomeWeek(null)
-                loadScheduleFull(silent = true)
+                loadSchedule()
                 loadGrades()
             } else {
                 loginError = err
@@ -467,45 +462,40 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 官方"我的周课表":按周查询(周次由教务系统计算,零误差);结果按周缓存 */
-    fun loadHomeWeek(week: Int?) {
-        val target = week
-            ?: officialWeek.takeIf { it > 0 }
-            ?: SettingsStore.currentWeek(System.currentTimeMillis(), settings.weekStartMillis)
-                .coerceIn(1, 30)
-        selectedWeek = target
-        schedMode = "WEEK"
-
-        // 缓存命中:瞬时切换
-        homeCache[target]?.let { cached ->
-            courses = cached
-            loadedWeek = target
-            schedError = if (cached.isEmpty()) "本周暂无课程" else null
+    /**
+     * 加载学期全量课表(GET /jsxsd/xskb/xskb_list.do?xnxq01id=,一次请求),
+     * 周次切换全部本地过滤完成,不再按周请求(避免滑动多次后周次漂移)。
+     */
+    fun loadSchedule(force: Boolean = false) {
+        if (schedLoaded && !force) {
+            schedMode = "WEEK"
+            selectedWeek = officialWeek
+            courses = allCourses
             return
         }
-
         schedLoading = true
         schedError = null
         viewModelScope.launch {
             try {
-                var fetched: List<Course>? = null
-                var weekNo = 0
-                try {
-                    // 优先走 xskb_list.do + zc 参数(服务端按周过滤,同 YiQiu v2)
-                    val byWeek = client.fetchCoursesByWeek(schedSem, target)
-                    fetched = byWeek
-                    weekNo = target
+                val full = client.fetchCourses(schedSem)
+                allCourses = full
+                courses = full
+                schedLoaded = true
+                name = client.studentName ?: name
+                settings.cacheCourses(full)
+                // 官方当前周:用首页周课表接口取一次(周四锚定,规避周定义边界)
+                officialWeek = try {
+                    client.fetchHomeWeek(thisWeekThursdayText()).week.takeIf { it > 0 }
+                        ?: localCurrentWeek()
                 } catch (_: Exception) {
-                    // 回退:首页周课表接口
-                    val hw = client.fetchHomeWeek(weekRqText(target))
-                    fetched = hw.courses
-                    weekNo = hw.week
+                    localCurrentWeek()
                 }
-                if (weekNo > 0) officialWeek = weekNo
-                homeCache[target] = fetched
-                courses = fetched
-                loadedWeek = target
-                schedError = if (fetched.isEmpty()) "本周暂无课程" else null
+                selectedWeek = officialWeek
+                schedMode = "WEEK"
+                if (settings.reminderEnabled) {
+                    ReminderScheduler.reschedule(getApplication())
+                }
+                schedError = if (full.isEmpty()) "本学期暂无课表(接口返回为空)" else null
             } catch (e: Exception) {
                 schedError = e.message ?: "加载失败"
             } finally {
@@ -514,46 +504,36 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 查询某周对应的日期(以官方当前周为锚,取该周周中-周四):
-     *  周四是"绝对属于目标周"的日子,避开周日/周一的周定义边界(深信服按周日开新周) */
-    private fun weekRqText(week: Int): String {
-        val base = if (officialWeek > 0) officialWeek
-        else SettingsStore.currentWeek(System.currentTimeMillis(), settings.weekStartMillis)
+    private fun localCurrentWeek(): Int =
+        SettingsStore.currentWeek(System.currentTimeMillis(), settings.weekStartMillis).coerceIn(1, 30)
+
+    private fun thisWeekThursdayText(): String {
         val cal = Calendar.getInstance()
         val dow = cal.get(Calendar.DAY_OF_WEEK)
-        cal.add(Calendar.DAY_OF_MONTH, -((dow + 5) % 7)) // 回到本周一
-        cal.add(Calendar.DAY_OF_MONTH, (week - base) * 7)
-        cal.add(Calendar.DAY_OF_MONTH, 3)                // 周一 → 周四(周中)
+        cal.add(Calendar.DAY_OF_MONTH, -((dow + 5) % 7)) // 本周一
+        cal.add(Calendar.DAY_OF_MONTH, 3)                 // 周四
         return java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(cal.time)
     }
 
-    /** 学期全量课表("全部周次"模式);silent=true 时仅更新提醒缓存,不改变界面 */
-    fun loadScheduleFull(silent: Boolean = false) {
-        if (silent) {
-            viewModelScope.launch {
-                try {
-                    settings.cacheCourses(client.fetchCourses(schedSem))
-                    if (settings.reminderEnabled) ReminderScheduler.reschedule(getApplication())
-                } catch (_: Exception) {}
-            }
-            return
-        }
-        schedLoading = true
-        schedError = null
-        viewModelScope.launch {
-            try {
-                courses = client.fetchCourses(schedSem)
-                name = client.studentName ?: name
-                settings.cacheCourses(courses)
-                schedMode = "ALL"
-                selectedWeek = 0
-                schedError = if (courses.isEmpty()) "本学期暂无课表(接口返回为空)" else null
-            } catch (e: Exception) {
-                schedError = e.message ?: "加载失败"
-            } finally {
-                schedLoading = false
-            }
-        }
+    /** 切换查看的周:纯本地过滤,瞬时完成 */
+    fun selectWeek(week: Int) {
+        selectedWeek = week.coerceIn(1, 25)
+        schedMode = "WEEK"
+    }
+
+    fun showAllSemester() {
+        schedMode = "ALL"
+        selectedWeek = 0
+    }
+
+    fun backToCurrentWeek() {
+        schedMode = "WEEK"
+        selectedWeek = officialWeek.coerceAtLeast(1)
+    }
+
+    fun changeSemester(sem: Semester) {
+        schedSem = sem
+        loadSchedule(force = true)
     }
 
     fun loadGrades() {
@@ -627,7 +607,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         account = ""; password = ""
         courses = emptyList(); grades = emptyList()
         xkRounds = emptyList(); selectedCourses = emptyList(); selectionLoaded = false
-        homeCache.clear(); loadedWeek = -1
+        allCourses = emptyList(); schedLoaded = false
         pyfa = null; pyfaError = null
         exams = emptyList(); examError = null
         loginError = null
@@ -1148,7 +1128,7 @@ class MainActivity : ComponentActivity() {
                         onSelect = { t ->
                             tab = t
                             when (t) {
-                                0 -> if (vm.courses.isEmpty() && !vm.skippedLogin) vm.loadHomeWeek(null)
+                                0 -> if (vm.allCourses.isEmpty() && !vm.skippedLogin) vm.loadSchedule()
                                 1 -> vm.loadWaterDevices()
                                 2 -> if (!vm.selectionLoaded) vm.loadSelection()
                             }
@@ -1179,22 +1159,18 @@ class MainActivity : ComponentActivity() {
                             0 -> if (!vm.loggedIn) LoginRequired(onGoLogin = onOpenJwxtLogin) else ScheduleScreen(
                                 loading = vm.schedLoading,
                                 error = vm.schedError,
-                                courses = vm.courses,
+                                allCourses = vm.allCourses,
                                 mode = vm.schedMode,
                                 officialWeek = vm.officialWeek,
-                                selectedWeek = vm.selectedWeek,
                                 semesters = vm.semesters,
                                 selected = vm.schedSem,
                                 sectionTimes = vm.settings.sectionTimes,
                                 bgEnabled = showBg,
-                                weekData = { week -> vm.cachedWeek(week) },
-                                onWeekChange = { vm.loadHomeWeek(it) },
-                                onShowAll = { vm.loadScheduleFull() },
-                                onSemesterChange = { vm.schedSem = it; vm.loadScheduleFull() },
-                                onRetry = {
-                                    if (vm.schedMode == "ALL") vm.loadScheduleFull()
-                                    else vm.loadHomeWeek(vm.selectedWeek.takeIf { it > 0 })
-                                },
+                                onSelectWeek = { vm.selectWeek(it) },
+                                onShowAll = { vm.showAllSemester() },
+                                onBackToWeek = { vm.backToCurrentWeek() },
+                                onSemesterChange = { vm.changeSemester(it) },
+                                onRetry = { vm.loadSchedule(force = true) },
                                 onOpenExams = onOpenExams,
                             )
                             1 -> WaterScreen(
