@@ -12,8 +12,8 @@ android {
         applicationId = "com.ncepu.jw"
         minSdk = 26
         targetSdk = 35
-        versionCode = 35
-        versionName = "4.4"
+        versionCode = 36
+        versionName = "4.5"
     }
 
     buildTypes {

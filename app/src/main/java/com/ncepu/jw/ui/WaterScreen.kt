@@ -200,11 +200,14 @@ fun WaterScreen(
                 ) {
                     Text("我的设备", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onScan, enabled = !state.loading) {
+                        Text("扫码")
+                    }
+                    TextButton(onClick = { showAddDialog = true }, enabled = !state.loading) {
+                        Text("添加")
+                    }
                     TextButton(onClick = onRefreshDevices, enabled = !state.loading) {
                         Text("刷新")
-                    }
-                    TextButton(onClick = { showAddDialog = true }) {
-                        Text("添加")
                     }
                 }
                 state.message?.let {

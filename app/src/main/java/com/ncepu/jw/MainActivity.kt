@@ -220,9 +220,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             if (r.ok) {
                 waterToken = ilife.extractToken(r.json ?: JSONObject())
                 settings.waterToken = waterToken
-                waterState = waterState.copy(loggedIn = waterToken.isNotBlank(), loading = false)
+                waterSmsCode = ""
+                waterCaptchaInput = ""
+                waterState = waterState.copy(loggedIn = true, loading = false, message = null)
                 loadWaterDevices()
             } else {
+                refreshCaptcha()
                 waterState = waterState.copy(
                     loading = false,
                     message = "登录失败:${IlifeClient.readable(r.code, r.msg)}",
@@ -801,6 +804,7 @@ class MainActivity : ComponentActivity() {
                             onOpenWater = { navController.navigate("water") },
                             onOpenWaterScan = { navController.navigate("waterscan") },
                             onOpenWasher = { navController.navigate("washer") },
+                            onOpenWasherScan = { navController.navigate("washerscan") },
                             onOpenJwxtLogin = { navController.navigate("login") },
                             onOpenGradesNav = {
                                 if (!vm.loggedIn) navController.navigate("login")
@@ -869,12 +873,22 @@ class MainActivity : ComponentActivity() {
                             onSendSms = { vm.washerRequestCaptcha() },
                             onLogin = { vm.doWasherLogin() },
                             onScanOrInput = { vm.washerScan(it) },
+                            onScan = { navController.navigate("washerscan") },
                             onSelectModel = { _, _ -> },
                             onCreateOrder = { vm.washerCreateOrder() },
                             onPay = { vm.washerPay() },
                             onRefreshOrder = { vm.washerRefresh() },
                             onStartWash = { vm.washerStart() },
                             onBack = { navController.popBackStack() },
+                        )
+                    }
+                    composable("washerscan") {
+                        WaterScanScreen(
+                            onResult = { raw ->
+                                vm.washerScan(WaterDeviceIdParser.normalize(raw))
+                                navController.popBackStack()
+                            },
+                            onCancel = { navController.popBackStack() },
                         )
                     }
                     composable("water") {
@@ -1064,6 +1078,7 @@ class MainActivity : ComponentActivity() {
         onOpenExams: () -> Unit,
         onOpenWater: () -> Unit,
         onOpenWaterScan: () -> Unit,
+        onOpenWasherScan: () -> Unit,
         onOpenWasher: () -> Unit,
         onOpenJwxtLogin: () -> Unit,
         onOpenGradesNav: () -> Unit,

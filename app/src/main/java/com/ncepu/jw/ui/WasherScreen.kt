@@ -74,6 +74,7 @@ fun WasherScreen(
     onRefreshOrder: () -> Unit,
     onStartWash: () -> Unit,
     onRemoveWasher: (String) -> Unit = {},
+    onScan: () -> Unit = {},
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -150,7 +151,7 @@ fun WasherScreen(
                             Column(Modifier.padding(12.dp)) {
                                 Text("1. 添加洗衣机", fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.height(6.dp))
-                                InputDeviceRow(onScanOrInput)
+                                InputDeviceRow(onScanOrInput, onScan)
                                 if (state.scannedDevice != null) {
                                     Text(
                                         "设备 ${state.scannedDevice} ${state.deviceSummary}",
@@ -288,20 +289,25 @@ fun WasherScreen(
 }
 
 @Composable
-private fun InputDeviceRow(onScanOrInput: (String) -> Unit) {
+private fun InputDeviceRow(onScanOrInput: (String) -> Unit, onScan: () -> Unit) {
     var input by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
-            value = input,
-            onValueChange = { input = it },
-            label = { Text("扫机身二维码 / 输入二维码内容") },
-            singleLine = true,
-            modifier = Modifier.weight(1f),
-        )
-        Spacer(Modifier.width(8.dp))
-        Button(
-            onClick = { if (input.isNotBlank()) onScanOrInput(input) },
-            enabled = input.isNotBlank(),
-        ) { Text("识别") }
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = input,
+                onValueChange = { input = it },
+                label = { Text("输二维码内容 / 设备编号") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = { if (input.isNotBlank()) onScanOrInput(input) },
+                enabled = input.isNotBlank(),
+            ) { Text("识别") }
+        }
+        TextButton(onClick = onScan, modifier = Modifier.align(Alignment.End)) {
+            Text("📷 扫码添加")
+        }
     }
 }
