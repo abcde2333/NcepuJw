@@ -53,10 +53,14 @@ object Updater {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        // 总超时:慢镜像(能连上但速度极低)及时放弃,换下一个下载源
+        .callTimeout(10, TimeUnit.MINUTES)
         .build()
 
     fun currentVersionCode(ctx: Context): Long = try {
-        ctx.packageManager.getPackageInfo(ctx.packageName, 0).longVersionCode
+        val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        if (android.os.Build.VERSION.SDK_INT >= 28) pi.longVersionCode
+        else pi.versionCode.toLong()
     } catch (_: Exception) {
         0L
     }
@@ -92,7 +96,9 @@ object Updater {
     /** 下载 APK(镜像链)到 update 目录;成功返回文件,失败抛异常。onProgress 0-100 */
     suspend fun downloadApk(ctx: Context, info: Info, onProgress: (Int) -> Unit): File =
         withContext(Dispatchers.IO) {
-            val dir = File(ctx.getExternalFilesDir(null), "update").apply { mkdirs() }
+            // 外部存储不可用时回退内部存储(FileProvider 已声明 files-path)
+            val base = ctx.getExternalFilesDir(null) ?: File(ctx.filesDir, "update")
+            val dir = File(base, "update").apply { mkdirs() }
             val dst = File(dir, "NcepuJw-${info.versionName}.apk")
             var lastError: Exception? = null
             for (prefix in DOWNLOAD_PREFIXES) {
@@ -106,6 +112,10 @@ object Updater {
                         val total = resp.body?.contentLength() ?: -1L
                         val src = resp.body?.byteStream() ?: throw IllegalStateException("空响应")
                         val tmp = File(dst.absolutePath + ".tmp")
+                        // 完整性校验:边写边算 sha256(latest.json 携带,镜像投毒/传输损坏在此拦截)
+                        val expected = info.apkHash.trim()
+                        val md = if (expected.isNotBlank())
+                            java.security.MessageDigest.getInstance("SHA-256") else null
                         src.use { input ->
                             tmp.outputStream().use { out ->
                                 val buf = ByteArray(64 * 1024)
@@ -114,6 +124,7 @@ object Updater {
                                 var lastPct = -1
                                 while (input.read(buf).also { read = it } != -1) {
                                     out.write(buf, 0, read)
+                                    md?.update(buf, 0, read)
                                     done += read
                                     if (total > 0) {
                                         val pct = (done * 100 / total).toInt()
@@ -123,16 +134,14 @@ object Updater {
                                         }
                                     }
                                 }
+                                out.flush()
                             }
                         }
-                        // 完整性校验:latest.json 携带 sha256,镜像投毒/传输损坏在此拦截
-                        val expected = info.apkHash.trim()
-                        if (expected.isNotBlank()) {
-                            val digest = java.security.MessageDigest.getInstance("SHA-256")
-                                .digest(dst.readBytes())
-                            val hex = digest.joinToString("") { "%02x".format(it) }
+                        // 校验失败删临时文件并抛错;通过则原子化落位
+                        if (md != null) {
+                            val hex = md.digest().joinToString("") { "%02x".format(it) }
                             if (!hex.equals(expected, ignoreCase = true)) {
-                                dst.delete()
+                                tmp.delete()
                                 throw IllegalStateException("APK 完整性校验失败,已取消安装")
                             }
                         }
