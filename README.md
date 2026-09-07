@@ -3,6 +3,7 @@
 一个非官方的华北电力大学教务系统 Android 客户端,通过逆向 `https://jwxt.ncepu.edu.cn/`(强智科技教务系统,老版 jsxsd 部署)的 Web 接口实现,并集成了校园生活服务(慧生活798 直饮水、U净洗衣机)。原生 Kotlin + Jetpack Compose,Material You 风格。
 
 > ⚠️ 仅供个人学习使用,请勿用于商业用途或高频请求。所有凭据只保存在本机 SharedPreferences,不上传任何服务器。本项目与华北电力大学及上述服务商均无关联。
+> ⚠️本项目代码几乎完全由AI完成
 
 ## 功能
 
