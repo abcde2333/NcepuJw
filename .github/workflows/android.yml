@@ -13,6 +13,9 @@ jobs:
   build:
     name: Build release APK (R8)
     runs-on: ubuntu-latest
+    outputs:
+      vcode: ${{ steps.ver.outputs.vcode }}
+      vname: ${{ steps.ver.outputs.vname }}
     steps:
       - uses: actions/checkout@v4
 
