@@ -95,9 +95,12 @@ jobs:
           VNAME="${{ needs.build.outputs.vname }}"
           APKURL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/NcepuJw-${GITHUB_REF_NAME}.apk"
           JSON=$(jq -n --arg c "$VCODE" --arg n "$VNAME" --arg u "$APKURL" --arg h "$HASH"             '{versionCode:($c|tonumber), versionName:$n, apkUrl:$u, apkHash:$h}')
-          SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json?ref=main" --jq '.sha' 2>/dev/null || true)
+          SHA=""
+          SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json?ref=main" --jq '.sha' 2>/dev/null) || SHA=""
           ARGS=(-f message="latest.json: ${GITHUB_REF_NAME}" -f content="$(echo "$JSON" | base64 -w0)")
-          [ -n "$SHA" ] && ARGS+=(-f sha="$SHA")
+          if [ -n "$SHA" ]; then
+            ARGS+=(-f sha="$SHA")
+          fi
           gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json" "${ARGS[@]}"
 
       - name: Create GitHub Release
