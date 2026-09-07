@@ -1,8 +1,8 @@
 package com.ncepu.jw.ui
 
-import android.graphics.BitmapFactory
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,33 +13,38 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ncepu.jw.data.UjingClient
+import com.ncepu.jw.data.WasherModel
 import com.ncepu.jw.data.WasherOrderInfo
 
 /** 洗衣页状态(MainActivity 持有) */
@@ -50,14 +55,16 @@ data class WasherUiState(
     val smsSent: Boolean = false,
     val scannedDevice: String? = null,       // deviceId(扫码/手输后)
     val deviceSummary: String = "",          // 设备名/门店摘要
-    val models: List<Triple<Int, String, String>> = emptyList(), // workModelId, 名称, 价格
+    val models: List<WasherModel> = emptyList(),          // 洗涤模式(含各模式加购组)
     val selectedModelId: Int? = null,        // 当前选中的洗涤模式
+    val selectedTemperatureId: Int = 1,      // 水温档(1 常温 / 2 30°C / 3 40°C / 4 60°C)
+    val selectedAdditions: Map<String, Int?> = emptyMap(), // 加购组 key → 档位 id(null=不添加)
     val currentOrder: WasherOrderInfo? = null,
-    val payUrl: String = "",                 // 支付宝收银台参数(orderInfo),展示给用户跳转
-    val savedWashers: List<Pair<String, String>> = emptyList(), // 已保存洗衣机(did, deviceNo)
+    val payUrl: String = "",
+    val savedWashers: List<Pair<String, String>> = emptyList(),
 )
 
-/** 洗衣页:登录 → 扫码/输设备号 → 选套餐下单 → 支付 → 启动/状态 */
+/** 洗衣页:登录 → 扫码/输设备号 → 模式/温度/加购下单 → 支付 → 启动/状态 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WasherScreen(
@@ -70,7 +77,9 @@ fun WasherScreen(
     onSendSms: () -> Unit,
     onLogin: () -> Unit,
     onScanOrInput: (String) -> Unit,
-    onSelectModel: (Int, Int) -> Unit,
+    onSelectModel: (Int) -> Unit,
+    onSelectTemperature: (Int) -> Unit,
+    onSelectAddition: (String, Int?) -> Unit,
     onCreateOrder: () -> Unit,
     onPay: () -> Unit,
     onRefreshOrder: () -> Unit,
@@ -80,6 +89,7 @@ fun WasherScreen(
     onBack: () -> Unit,
 ) {
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("U净洗衣") },
@@ -88,6 +98,7 @@ fun WasherScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
             )
         },
     ) { padding ->
@@ -148,6 +159,7 @@ fun WasherScreen(
                 }
             } else {
                 // ---------- 业务流 ----------
+                val selectedModel = state.models.firstOrNull { it.id == state.selectedModelId }
                 LazyColumn(Modifier.fillMaxSize()) {
                     // 1. 扫码/输设备号
                     item {
@@ -200,48 +212,106 @@ fun WasherScreen(
                             }
                         }
                     }
-                    // 2. 选套餐下单
+                    // 2. 洗涤模式(接口按设备返回,不同机器模式/价格不同)
                     if (state.models.isNotEmpty()) {
                         item {
-                            Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
-                                Column(Modifier.padding(12.dp)) {
-                                    Text("2. 选择洗涤模式并下单", fontWeight = FontWeight.Bold)
-                                    Spacer(Modifier.height(6.dp))
-                                    state.models.forEach { (id, name, extra) ->
-                                        Row(
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .clickable { onSelectModel(id, id) }
-                                                .padding(vertical = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Text(
-                                                if (state.selectedModelId == id) "● " else "○ ",
-                                                color = MaterialTheme.colorScheme.primary,
-                                            )
-                                            Text(name, Modifier.weight(1f))
-                                            Text(
-                                                extra,
-                                                color = MaterialTheme.colorScheme.primary,
+                            OrderSection(title = "2. 洗涤模式", tail = "请选择洗涤模式") {
+                                state.models.chunked(4).forEach { rowModels ->
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        rowModels.forEach { m ->
+                                            OptionChip(
+                                                title = m.name,
+                                                subtitle = m.priceText,
+                                                selected = state.selectedModelId == m.id,
+                                                modifier = Modifier.weight(1f),
+                                                onClick = { onSelectModel(m.id) },
                                             )
                                         }
-                                        HorizontalDivider()
+                                        repeat(4 - rowModels.size) { Spacer(Modifier.weight(1f)) }
                                     }
-                                    Button(
-                                        onClick = onCreateOrder,
-                                        enabled = !state.loading,
-                                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                                    ) { Text("创建订单") }
                                 }
                             }
                         }
                     }
-                    // 3. 订单与支付
+                    // 3. 温度选择(官方协议固定 4 档,按档加价)
+                    if (selectedModel != null) {
+                        item {
+                            OrderSection(title = "温度选择", tail = "请选择洗涤温度") {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    UjingClient.TEMPERATURES.forEach { (id, name, surcharge) ->
+                                        OptionChip(
+                                            title = name,
+                                            subtitle = if (surcharge > 0) "+¥${UjingClient.fen2yuan(surcharge)}" else null,
+                                            selected = state.selectedTemperatureId == id,
+                                            modifier = Modifier.weight(1f),
+                                            onClick = { onSelectTemperature(id) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // 4. 加购组(洗衣液/除菌液…,来自所选模式的接口数据;不同机器可选项不同)
+                    selectedModel?.additions?.forEach { group ->
+                        item(key = group.key) {
+                            OrderSection(title = group.name, tail = "请选择用量") {
+                                val options: List<Pair<Int?, Pair<String, Int>>> = buildList {
+                                    add(null to ("不添加" to 0))
+                                    group.options.forEach { add(it.id to (it.name to it.priceFen)) }
+                                }
+                                options.chunked(3).forEach { rowOpts ->
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        rowOpts.forEach { (optId, ui) ->
+                                            OptionChip(
+                                                title = ui.first,
+                                                subtitle = if (ui.second > 0) "¥${UjingClient.fen2yuan(ui.second)}" else null,
+                                                selected = state.selectedAdditions[group.key] == optId,
+                                                modifier = Modifier.weight(1f),
+                                                onClick = { onSelectAddition(group.key, optId) },
+                                            )
+                                        }
+                                        repeat(3 - rowOpts.size) { Spacer(Modifier.weight(1f)) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // 5. 下单(预估价 = 模式 + 水温加价 + 加购)
+                    if (selectedModel != null) {
+                        item {
+                            val tempFen = UjingClient.TEMPERATURES
+                                .firstOrNull { it.first == state.selectedTemperatureId }?.third ?: 0
+                            val addFen = selectedModel.additions.sumOf { g ->
+                                g.options.firstOrNull { it.id == state.selectedAdditions[g.key] }?.priceFen ?: 0
+                            }
+                            val estimate = selectedModel.priceFen + tempFen + addFen
+                            Button(
+                                onClick = onCreateOrder,
+                                enabled = !state.loading,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .height(48.dp),
+                            ) {
+                                Text("创建订单 · 预估 ¥${UjingClient.fen2yuan(estimate)}")
+                            }
+                        }
+                    }
+                    // 6. 订单与支付
                     state.currentOrder?.let { order ->
                         item {
                             Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
                                 Column(Modifier.padding(12.dp)) {
-                                    Text("3. 订单", fontWeight = FontWeight.Bold)
+                                    Text("订单", fontWeight = FontWeight.Bold)
                                     Spacer(Modifier.height(6.dp))
                                     Text("订单号 ${order.orderId}", fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.outline)
@@ -295,6 +365,65 @@ fun WasherScreen(
         }
     }
 }
+
+/** 下单配置区块(标题 + 右侧灰字 + 内容) */
+@Composable
+private fun OrderSection(title: String, tail: String, content: @Composable () -> Unit) {
+    Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text(tail, fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+            }
+            Spacer(Modifier.height(6.dp))
+            content()
+        }
+    }
+}
+
+/** 可选项芯片(官方同款观感:圆角卡片,选中主色描边) */
+@Composable
+private fun OptionChip(
+    title: String,
+    subtitle: String?,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer
+        else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            if (selected) 2.dp else 0.8.dp,
+            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+        ),
+        modifier = modifier.clickable { onClick() },
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(vertical = 10.dp, horizontal = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                title,
+                fontSize = 13.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    subtitle,
+                    fontSize = 11.sp,
+                    color = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+    }
+}
+
+private data class WasherAdditionUiOption(val name: String, val priceFen: Int)
 
 @Composable
 private fun InputDeviceRow(onScanOrInput: (String) -> Unit, onScan: () -> Unit) {

@@ -51,7 +51,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import com.kyant.backdrop.backdrops.layerBackdrop
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -190,17 +193,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var skippedLogin by mutableStateOf(false)   // 跳过教务登录(离线/仅用饮水机)
 
     init {
-        // 首屏直出:先把本地缓存的课表灌进状态(弱网/校外不再白屏转圈),
+        // 首屏直出:先把本地缓存的课表/选课灌进状态(弱网/校外/未登录不再白屏转圈),
         // 之后登录成功时会静默刷新覆盖
         viewModelScope.launch(Dispatchers.IO) {
-            val cached = settings.loadCachedCourses()
-            if (cached.isNotEmpty() && allCourses.isEmpty()) {
-                allCourses = cached
-                courses = cached
-                schedLoaded = true
-                officialWeek = localCurrentWeek()
-                selectedWeek = officialWeek
-            }
+            fallBackToCache()
             // 选课中心同理:缓存直出,避免频繁切页触发风控
             settings.loadCachedSelection()?.let { sel ->
                 if (xkRounds.isEmpty()) {
@@ -433,13 +429,18 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 settings.addWasherDevice(deviceId, info.json?.optString("deviceNo", "") ?: "")
                 washerState = washerState.copy(savedWashers = settings.washerDevices)
                 val models = UjingClient.Parsers.parseModels(info.json)
+                val defaultId = UjingClient.Parsers.defaultModelId(models)
                 washerState = washerState.copy(
                     loading = false,
                     scannedDevice = deviceId,
                     deviceSummary = (info.json?.optString("storeName", "") ?: "") + " " +
                         (info.json?.optString("deviceTypeName", "") ?: ""),
                     models = models,
-                    selectedModelId = UjingClient.Parsers.defaultModelId(models),
+                    selectedModelId = defaultId,
+                    // 加购组跟随所选模式,默认全部"不添加"
+                    selectedAdditions = models.firstOrNull { it.id == defaultId }
+                        ?.additions?.associate { it.key to null } ?: emptyMap(),
+                    selectedTemperatureId = 1,
                     message = null,
                 )
             } catch (e: Exception) {
@@ -455,13 +456,21 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             washerState = washerState.copy(message = "请先识别设备")
             return
         }
-        val model = washerState.models.firstOrNull { it.first == washerState.selectedModelId }
-            ?: washerState.models.firstOrNull { it.first == 1 }
+        val model = washerState.models.firstOrNull { it.id == washerState.selectedModelId }
+            ?: washerState.models.firstOrNull { it.id == 1 }
             ?: washerState.models.firstOrNull()
             ?: return
+        // 加购:只把"已选档位"(非不添加)放进下单字段(key 即接口返回的 wp_xxx 字段名)
+        val extras = model.additions.mapNotNull { g ->
+            washerState.selectedAdditions[g.key]?.let { g.key to it }
+        }.toMap()
         washerState = washerState.copy(loading = true, message = null)
         viewModelScope.launch {
-            val r = ujing.createOrder(washerToken, deviceId, scanned.first, scanned.second, model.first, temperatureId = 1)
+            val r = ujing.createOrder(
+                washerToken, deviceId, scanned.first, scanned.second, model.id,
+                temperatureId = washerState.selectedTemperatureId,
+                extras = extras,
+            )
             if (!r.ok) {
                 washerState = washerState.copy(loading = false, message = "下单失败:" + UjingClient.readable(r.code, r.msg))
                 return@launch
@@ -614,7 +623,13 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             courses = allCourses
             return
         }
-        val hadCache = allCourses.isNotEmpty()
+        // 未登录:请求必然失败(无会话,302),不浪费请求也不触发风控,直接回退缓存
+        if (!loggedIn) {
+            if (!fallBackToCache() && !silent) {
+                schedError = "请先在「我的」登录教务系统后加载课表"
+            }
+            return
+        }
         if (!silent) {
             schedLoading = true
             schedError = null
@@ -660,14 +675,30 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     schedError = if (full.isEmpty()) "本学期暂无课表(接口返回为空)" else null
                 }
             } catch (e: Exception) {
-                // 缓存已上屏的静默刷新失败:不打扰用户,下次进入再试
-                if (!silent || allCourses.isEmpty()) {
+                // 界面上还没有数据时优先回退本地缓存;失败且无缓存才显示错误
+                if (allCourses.isEmpty()) {
+                    if (!fallBackToCache()) schedError = e.message ?: "加载失败"
+                } else if (!silent) {
                     schedError = e.message ?: "加载失败"
                 }
             } finally {
                 schedLoading = false
             }
         }
+    }
+
+    /** 未登录/加载失败时回退本地缓存课表;返回是否已有可显示的课表 */
+    private fun fallBackToCache(): Boolean {
+        if (allCourses.isNotEmpty()) return true
+        val cached = settings.loadCachedCourses()
+        if (cached.isEmpty()) return false
+        allCourses = cached
+        courses = cached
+        schedLoaded = true
+        schedError = null
+        if (officialWeek <= 0) officialWeek = localCurrentWeek()
+        if (selectedWeek <= 0) selectedWeek = officialWeek
+        return true
     }
 
     private fun localCurrentWeek(): Int =
@@ -1052,8 +1083,22 @@ class MainActivity : ComponentActivity() {
                             onLogin = { vm.doWasherLogin() },
                             onScanOrInput = { vm.washerScan(it) },
                             onScan = { navController.navigate("washerscan") },
-                            onSelectModel = { id, _ ->
-                                vm.washerState = vm.washerState.copy(selectedModelId = id)
+                            onSelectModel = { id ->
+                                val models = vm.washerState.models
+                                vm.washerState = vm.washerState.copy(
+                                    selectedModelId = id,
+                                    // 加购组跟随模式切换,重置为"不添加"
+                                    selectedAdditions = models.firstOrNull { it.id == id }
+                                        ?.additions?.associate { it.key to null } ?: emptyMap(),
+                                )
+                            },
+                            onSelectTemperature = { id ->
+                                vm.washerState = vm.washerState.copy(selectedTemperatureId = id)
+                            },
+                            onSelectAddition = { key, optId ->
+                                vm.washerState = vm.washerState.copy(
+                                    selectedAdditions = vm.washerState.selectedAdditions + (key to optId),
+                                )
                             },
                             onCreateOrder = { vm.washerCreateOrder() },
                             onPay = { vm.washerPay() },
@@ -1264,6 +1309,11 @@ class MainActivity : ComponentActivity() {
         var showBg by remember(appearance.bgHas, appearance.bgVersion) {
             mutableStateOf(appearance.bgHas)
         }
+        // 液态玻璃折射源:背景图的 Compose 隐形副本(仅进入 backdrop 采样层,不参与显示)
+        val glassBackdrop = com.kyant.backdrop.backdrops.rememberLayerBackdrop()
+        var bgBmp by remember(appearance.bgHas, appearance.bgVersion) {
+            mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+        }
 
         remember(showBg) {
             bgHost.removeAllViews()
@@ -1290,6 +1340,7 @@ class MainActivity : ComponentActivity() {
                 vm.settings.backgroundFile()?.let { loadBgBitmap(it) }
             }
             bgImageView.setImageBitmap(bmp?.asAndroidBitmap())
+            bgBmp = bmp
         }
         // 模糊只重设 RenderEffect,与解码解耦
         LaunchedEffect(appearance.bgHas, appearance.bgBlur, densityValue) {
@@ -1305,6 +1356,21 @@ class MainActivity : ComponentActivity() {
                 factory = { bgHost },
                 modifier = Modifier.fillMaxSize(),
             )
+            // 液态玻璃折射源:隐形壁纸副本(alpha 0 只进采样层)。有背景图才折射壁纸。
+            if (showBg) {
+                val bmp = bgBmp
+                if (bmp != null) {
+                    androidx.compose.foundation.Image(
+                        bmp,
+                        null,
+                        Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { alpha = 0f }
+                            .layerBackdrop(glassBackdrop),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    )
+                }
+            }
             Scaffold(
                 containerColor = if (showBg) Color.Transparent else MaterialTheme.colorScheme.background,
                 bottomBar = {
@@ -1321,6 +1387,7 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         isDark = isDark,
+                        backdrop = glassBackdrop,
                     )
                 },
             ) { padding ->

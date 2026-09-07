@@ -12,8 +12,8 @@ android {
         applicationId = "com.ncepu.jw"
         minSdk = 26
         targetSdk = 35
-        versionCode = 44
-        versionName = "4.13"
+        versionCode = 45
+        versionName = "4.14"
     }
 
     buildTypes {
@@ -54,6 +54,9 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.materialkolor:material-kolor:2.0.0")
+    // Kyant0/AndroidLiquidGlass(Compose 多平台 backdrop):液态玻璃悬浮底栏
+    implementation("io.github.kyant0:backdrop:2.0.1")
+    implementation("io.github.kyant0:shapes:1.2.1")
     implementation("com.google.mlkit:barcode-scanning:17.2.0")
     implementation("net.sourceforge.jexcelapi:jxl:2.6.12")
     implementation("androidx.camera:camera-camera2:1.3.4")

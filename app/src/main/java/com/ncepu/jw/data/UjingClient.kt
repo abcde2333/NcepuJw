@@ -56,6 +56,14 @@ class UjingClient {
             else -> "状态 $status"
         }
 
+        /** 水温档:官方协议固定 4 档(id, 名称, 加价分)——接口按 washTemperatureId 计费,不随机型变化 */
+        val TEMPERATURES = listOf(
+            Triple(1, "常温", 0),
+            Triple(2, "30°C", 100),
+            Triple(3, "40°C", 150),
+            Triple(4, "60°C", 200),
+        )
+
         /** 分 → "1.50" */
         fun fen2yuan(fen: Int): String {
             val neg = fen < 0
@@ -180,7 +188,7 @@ class UjingClient {
         )
     }
 
-    /** 下单:POST orders/create */
+    /** 下单:POST orders/create(extras = 加购档位,键为接口返回的加购组 key,如 wp_detergentGearId) */
     suspend fun createOrder(
         token: String,
         deviceId: String,
@@ -188,6 +196,7 @@ class UjingClient {
         storeId: String,
         washModelId: Int,
         temperatureId: Int = 1,
+        extras: Map<String, Int> = emptyMap(),
     ): Result = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("type", 1)
@@ -196,6 +205,7 @@ class UjingClient {
             .put("deviceWashModelId", washModelId)
             .put("storeId", storeId)
             .put("washTemperatureId", temperatureId)
+        for ((k, v) in extras) body.put(k, v)
         send("POST", "orders/create", appCode = "BA", bodyJson = body, token = token)
     }
 
@@ -229,31 +239,66 @@ class UjingClient {
 
     object Parsers {
         /**
-         * 从套餐 info(data 层)提取洗涤模式列表。
+         * 从套餐 info(data 层)提取洗涤模式(含各模式可用的加购组)。
          * 字段:deviceWashModel[] → workModelId / workModelName / basePrice(分) / time(分钟)
+         * 加购:additionDevices(直接数组或嵌套 {washingPartnerFeature:[...]})
+         *   → [{key: "wp_detergentGearId", name: "洗衣液", options: [{id, name, price(分)}]}]
          */
-        fun parseModels(info: JSONObject?): List<Triple<Int, String, String>> {
-            val out = mutableListOf<Triple<Int, String, String>>()
-            if (info == null) return out
-            val arr = info.optJSONArray("deviceWashModel") ?: return out
+        fun parseModels(info: JSONObject?): List<WasherModel> {
+            if (info == null) return emptyList()
+            val arr = info.optJSONArray("deviceWashModel") ?: return emptyList()
+            val out = mutableListOf<WasherModel>()
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
                 val id = o.optInt("workModelId", 0)
                 val name = o.optString("workModelName", "")
-                val fen = o.optInt("basePrice", 0)
-                val minutes = o.optInt("time", 0)
-                if (id != 0 && name.isNotBlank()) {
-                    val price = "¥${fen2yuan(fen)}" + (if (minutes > 0) " · ${minutes}分钟" else "")
-                    out += Triple(id, name, price)
-                }
+                if (id == 0 || name.isBlank()) continue
+                out += WasherModel(
+                    id = id,
+                    name = name,
+                    priceFen = o.optInt("basePrice", 0),
+                    timeMinutes = o.optInt("time", 0),
+                    additions = parseAdditions(o),
+                )
             }
             return out
         }
 
+        /** 单个模式的加购组(key 即下单字段名,如 wp_detergentGearId / wp_disinfectantGearId) */
+        private fun parseAdditions(modelJson: JSONObject): List<WasherAdditionGroup> {
+            val direct = modelJson.opt("additionDevices")
+            val arr = when (direct) {
+                is org.json.JSONArray -> direct
+                is JSONObject -> direct.optJSONArray("washingPartnerFeature")
+                else -> null
+            } ?: return emptyList()
+            val groups = mutableListOf<WasherAdditionGroup>()
+            for (i in 0 until arr.length()) {
+                val g = arr.optJSONObject(i) ?: continue
+                val key = g.optString("key", "").trim()
+                if (key.isBlank()) continue
+                val opts = mutableListOf<WasherAdditionOption>()
+                g.optJSONArray("options")?.let { oa ->
+                    for (j in 0 until oa.length()) {
+                        val oo = oa.optJSONObject(j) ?: continue
+                        val oid = oo.optInt("id", -1)
+                        val oname = oo.optString("name", "")
+                        if (oid >= 0 && oname.isNotBlank()) {
+                            opts += WasherAdditionOption(oid, oname, oo.optInt("price", 0))
+                        }
+                    }
+                }
+                if (opts.isNotEmpty()) {
+                    groups += WasherAdditionGroup(key, g.optString("name", key), opts)
+                }
+            }
+            return groups
+        }
+
         /** 默认套餐:优先 workModelId=1,否则第一个(对齐 legacy defaultWashModelId) */
-        fun defaultModelId(models: List<Triple<Int, String, String>>): Int {
+        fun defaultModelId(models: List<WasherModel>): Int {
             if (models.isEmpty()) return 0
-            return (models.firstOrNull { it.first == 1 } ?: models.first()).first
+            return (models.firstOrNull { it.id == 1 } ?: models.first()).id
         }
 
         /** 从订单详情(data 层)提取展示字段 */
@@ -274,6 +319,24 @@ class UjingClient {
 }
 
 private fun JSONObject.str(key: String): String = optString(key, "").trim()
+
+/** 加购项的一个档位(标准量/大量等);价格单位分 */
+data class WasherAdditionOption(val id: Int, val name: String, val priceFen: Int)
+
+/** 一组加购(洗衣液/除菌液…);key 即下单字段名(wp_detergentGearId 等) */
+data class WasherAdditionGroup(val key: String, val name: String, val options: List<WasherAdditionOption>)
+
+/** 一个洗涤模式(basePrice/time 单位分/分钟),additions 为该模式可用的加购组 */
+data class WasherModel(
+    val id: Int,
+    val name: String,
+    val priceFen: Int,
+    val timeMinutes: Int,
+    val additions: List<WasherAdditionGroup> = emptyList(),
+) {
+    val priceText: String
+        get() = "¥${UjingClient.fen2yuan(priceFen)}" + (if (timeMinutes > 0) " · ${timeMinutes}分钟" else "")
+}
 
 /** 洗衣订单展示信息 */
 data class WasherOrderInfo(
