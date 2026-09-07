@@ -25,6 +25,8 @@ import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -58,6 +60,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.materialkolor.dynamicColorScheme
 import com.ncepu.jw.data.NavBarShape
 import com.ncepu.jw.data.NavMaterial
@@ -87,6 +90,13 @@ fun SettingsScreen(
     sectionTimes: List<String>,
     weekStartMillis: Long,
     exactAlarmGranted: Boolean,
+    scheduleSource: String = "AUTO",
+    onImportScheduleXls: () -> Unit = {},
+    onUseImportedChange: (Boolean) -> Unit = {},
+    update: com.ncepu.jw.update.Updater.State = com.ncepu.jw.update.Updater.State.Idle,
+    currentVersion: String = "",
+    onCheckUpdate: () -> Unit = {},
+    onUpdateAction: () -> Unit = {},
     onThemeModeChange: (ThemeMode) -> Unit,
     onPresetChange: (String) -> Unit,
     onDynamicColorChange: (Boolean) -> Unit,
@@ -232,20 +242,24 @@ fun SettingsScreen(
             supportingContent = {
                 Column(Modifier.padding(top = 8.dp)) {
                     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                        listOf(
-                            NavMaterial.SOLID to "实色",
-                            NavMaterial.LIQUID to "液态玻璃",
-                            NavMaterial.BLUR to "高斯模糊",
-                        ).forEachIndexed { i, (m, label) ->
+                        // 液态玻璃仅悬浮形状支持
+                        val materials = buildList {
+                            add(NavMaterial.SOLID to "实色")
+                            if (navShape == NavBarShape.FLOATING) add(NavMaterial.LIQUID to "液态玻璃")
+                            add(NavMaterial.BLUR to "高斯模糊")
+                        }
+                        materials.forEachIndexed { i, (m, label) ->
                             SegmentedButton(
                                 selected = navMaterial == m,
                                 onClick = { onNavMaterialChange(m) },
-                                shape = SegmentedButtonDefaults.itemShape(i, 3),
+                                shape = SegmentedButtonDefaults.itemShape(i, materials.size),
                             ) { Text(label) }
                         }
                     }
                     Text(
-                        "液态玻璃为悬浮胶囊底栏:按住当前页签出现液态玻璃泡,可左右拖动快速切换页面(需要背景图折射,Android 13+ 效果最佳)",
+                        if (navShape == NavBarShape.FLOATING)
+                            "液态玻璃为悬浮胶囊底栏:按住当前页签出现液态玻璃泡,可左右拖动快速切换页面(需要背景图折射,Android 13+ 效果最佳)"
+                        else "切换到悬浮形状后可选择液态玻璃",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(top = 6.dp),
@@ -257,6 +271,33 @@ fun SettingsScreen(
 
         // ---------- 课表 ----------
         SectionHeader(Icons.Filled.CalendarMonth, "课表")
+        ListItem(
+            headlineContent = { Text("使用导入的课表") },
+            supportingContent = {
+                Text(
+                    if (scheduleSource == "MANUAL") "开启中:显示手动导入的课表,不联网刷新"
+                    else "关闭中:登录/刷新时联网获取课表(切换学期同样联网)"
+                )
+            },
+            trailingContent = {
+                Switch(
+                    checked = scheduleSource == "MANUAL",
+                    onCheckedChange = onUseImportedChange,
+                )
+            },
+        )
+        ListItem(
+            headlineContent = { Text("导入课表文件(XLS)") },
+            supportingContent = {
+                Text(
+                    if (scheduleSource == "MANUAL")
+                        "已导入教务「打印课表」导出的 .xls 文件;重新导入会覆盖"
+                    else
+                        "导入教务「打印课表」导出的 .xls 文件,导入后可在上方开关启用"
+                )
+            },
+            trailingContent = { Button(onClick = onImportScheduleXls) { Text("选择文件") } },
+        )
         ListItem(
             headlineContent = { Text("课表背景图") },
             supportingContent = { Text(if (hasBackground) "已设置(仅课表页显示)" else "从相册选择图片") },
@@ -356,6 +397,49 @@ fun SettingsScreen(
             headlineContent = { Text("节次上课时间") },
             supportingContent = { Text(sectionTimes.joinToString(" / ")) },
             trailingContent = { TextButton(onClick = { showTimeDialog = true }) { Text("修改") } },
+        )
+        HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+
+        // ---------- 更新 ----------
+        SectionHeader(Icons.Filled.SystemUpdate, "更新")
+        ListItem(
+            headlineContent = { Text("检查更新") },
+            supportingContent = {
+                val status = when (update) {
+                    is com.ncepu.jw.update.Updater.State.Idle -> "当前版本 $currentVersion"
+                    is com.ncepu.jw.update.Updater.State.Checking -> "正在检查…"
+                    is com.ncepu.jw.update.Updater.State.Latest -> "已是最新(${(update as com.ncepu.jw.update.Updater.State.Latest).versionName})"
+                    is com.ncepu.jw.update.Updater.State.Available -> "发现新版本 v${(update as com.ncepu.jw.update.Updater.State.Available).info.versionName}"
+                    is com.ncepu.jw.update.Updater.State.Downloading -> "下载中 ${(update as com.ncepu.jw.update.Updater.State.Downloading).progress}%"
+                    is com.ncepu.jw.update.Updater.State.Downloaded -> "下载完成,点击安装"
+                    is com.ncepu.jw.update.Updater.State.Failed -> (update as com.ncepu.jw.update.Updater.State.Failed).message ?: "检查失败"
+                }
+                Text(status, style = MaterialTheme.typography.bodySmall)
+            },
+            trailingContent = {
+                when (val s = update) {
+                    is com.ncepu.jw.update.Updater.State.Checking ->
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    is com.ncepu.jw.update.Updater.State.Downloading ->
+                        CircularProgressIndicator(
+                            progress = { s.progress / 100f },
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    is com.ncepu.jw.update.Updater.State.Available ->
+                        Button(onClick = onUpdateAction) { Text("下载 v${s.info.versionName}") }
+                    is com.ncepu.jw.update.Updater.State.Downloaded ->
+                        Button(onClick = onUpdateAction) { Text("安装") }
+                    else ->
+                        TextButton(onClick = { onCheckUpdate() }) { Text("检查更新") }
+                }
+            },
+        )
+        Text(
+            "更新通过 GitHub Release 分发,自动尝试国内镜像加速;下载完成后按提示安装",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(horizontal = 20.dp),
         )
         HorizontalDivider(Modifier.padding(horizontal = 16.dp))
 

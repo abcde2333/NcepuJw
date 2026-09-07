@@ -1,6 +1,7 @@
 package com.ncepu.jw.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,11 +11,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -37,12 +40,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ncepu.jw.data.SavedWasher
 import com.ncepu.jw.data.UjingClient
 import com.ncepu.jw.data.WasherModel
 import com.ncepu.jw.data.WasherOrderInfo
@@ -59,9 +64,10 @@ data class WasherUiState(
     val selectedModelId: Int? = null,        // 当前选中的洗涤模式
     val selectedTemperatureId: Int = 1,      // 水温档(1 常温 / 2 30°C / 3 40°C / 4 60°C)
     val selectedAdditions: Map<String, Int?> = emptyMap(), // 加购组 key → 档位 id(null=不添加)
+    val autoStartAfterPay: Boolean = false,               // 支付成功后自动启动洗衣机
     val currentOrder: WasherOrderInfo? = null,
     val payUrl: String = "",
-    val savedWashers: List<Pair<String, String>> = emptyList(),
+    val savedWashers: List<com.ncepu.jw.data.SavedWasher> = emptyList(),
 )
 
 /** 洗衣页:登录 → 扫码/输设备号 → 模式/温度/加购下单 → 支付 → 启动/状态 */
@@ -77,6 +83,7 @@ fun WasherScreen(
     onSendSms: () -> Unit,
     onLogin: () -> Unit,
     onScanOrInput: (String) -> Unit,
+    onSelectSaved: (String) -> Unit,
     onSelectModel: (Int) -> Unit,
     onSelectTemperature: (Int) -> Unit,
     onSelectAddition: (String, Int?) -> Unit,
@@ -84,6 +91,7 @@ fun WasherScreen(
     onPay: () -> Unit,
     onRefreshOrder: () -> Unit,
     onStartWash: () -> Unit,
+    onAutoStartChange: (Boolean) -> Unit = {},
     onRemoveWasher: (String) -> Unit = {},
     onScan: () -> Unit = {},
     onBack: () -> Unit,
@@ -185,28 +193,61 @@ fun WasherScreen(
                             Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
                                 Column(Modifier.padding(12.dp)) {
                                     Text("我的洗衣机", fontWeight = FontWeight.Bold)
-                                    Spacer(Modifier.height(4.dp))
-                                    state.savedWashers.forEach { (did, name) ->
+                                    Spacer(Modifier.height(6.dp))
+                                    state.savedWashers.forEach { saved ->
+                                        val selected = saved.did == state.scannedDevice
                                         Row(
-                                            Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(
+                                                    if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                                                )
+                                                .border(
+                                                    if (selected) 1.5.dp else 0.8.dp,
+                                                    if (selected) MaterialTheme.colorScheme.primary
+                                                    else MaterialTheme.colorScheme.outlineVariant,
+                                                    RoundedCornerShape(12.dp),
+                                                )
+                                                .clickable { onSelectSaved(saved.did) }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
-                                            Text(
-                                                name.ifBlank { did },
-                                                Modifier.weight(1f).clickable { onScanOrInput(did) },
-                                                color = if (did == state.scannedDevice)
-                                                    MaterialTheme.colorScheme.primary
-                                                else MaterialTheme.colorScheme.onSurface,
-                                            )
+                                            Column(Modifier.weight(1f)) {
+                                                Text(
+                                                    saved.name.ifBlank { saved.did },
+                                                    fontSize = 13.sp,
+                                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                                    color = if (selected) MaterialTheme.colorScheme.primary
+                                                    else MaterialTheme.colorScheme.onSurface,
+                                                )
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(
+                                                        "编号 " + saved.did,
+                                                        fontSize = 11.sp,
+                                                        color = MaterialTheme.colorScheme.outline,
+                                                    )
+                                                    Spacer(Modifier.width(8.dp))
+                                                    Text(
+                                                        if (saved.status.isBlank()) "空闲" else saved.status,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        color = if (saved.status == "忙碌") MaterialTheme.colorScheme.error
+                                                        else MaterialTheme.colorScheme.primary,
+                                                    )
+                                                }
+                                            }
                                             Text(
                                                 "删除",
                                                 fontSize = 12.sp,
                                                 color = MaterialTheme.colorScheme.error,
                                                 modifier = Modifier
-                                                    .clickable { onRemoveWasher(did) }
+                                                    .clickable { onRemoveWasher(saved.did) }
                                                     .padding(horizontal = 8.dp, vertical = 4.dp),
                                             )
                                         }
+                                        Spacer(Modifier.height(6.dp))
                                     }
                                 }
                             }
@@ -322,8 +363,23 @@ fun WasherScreen(
                                         color = MaterialTheme.colorScheme.primary,
                                     )
                                     if (order.payPrice.isNotBlank()) {
-                                        Text("金额:¥${order.payPrice}", fontSize = 13.sp)
+                                        Text("金额:${order.payPrice}", fontSize = 13.sp)
                                     }
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            "支付成功后自动启动洗衣机",
+                                            fontSize = 13.sp,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        androidx.compose.material3.Switch(
+                                            checked = state.autoStartAfterPay,
+                                            onCheckedChange = onAutoStartChange,
+                                        )
+                                    }
+                                    Spacer(Modifier.height(4.dp))
                                     if (order.remainTimeSeconds > 0) {
                                         Text(
                                             "剩余 ${order.remainTimeSeconds / 60} 分 ${order.remainTimeSeconds % 60} 秒",
@@ -444,7 +500,13 @@ private fun InputDeviceRow(onScanOrInput: (String) -> Unit, onScan: () -> Unit) 
             ) { Text("识别") }
         }
         TextButton(onClick = onScan, modifier = Modifier.align(Alignment.End)) {
-            Text("📷 扫码添加")
+            Icon(
+                Icons.Filled.QrCodeScanner,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(4.dp))
+            Text("扫码添加")
         }
     }
 }

@@ -5,6 +5,15 @@ import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** 已保存的洗衣机(含下单必需的 program 信息与最近状态) */
+data class SavedWasher(
+    val did: String,
+    val name: String,
+    val deviceTypeId: Int = 0,
+    val storeId: String = "",
+    val status: String = "",
+)
+
 /** 主题模式 */
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
@@ -48,8 +57,11 @@ class SettingsStore(context: Context) {
         const val KEY_WASHER_DEVICES = "washer_devices"
         const val KEY_EXAM_CACHE = "exam_cache"
         const val KEY_SEL_CACHE = "selection_cache"
+        const val KEY_SCHED_SOURCE = "schedule_source" // AUTO=联网 / MANUAL=手动导入
+        const val KEY_UPDATE_CHECK = "update_last_check"
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
+        const val KEY_CRED_TYPE = "credential_type" // jwxt=教务密码 / sso=统一身份认证密码
 
         /** 五大节默认起始时间(大节=两小节连上),依华电实际作息:
          *  1节08:00 / 3节10:00 / 5节14:30 / 7节16:30 / 9节19:30 */
@@ -67,8 +79,17 @@ class SettingsStore(context: Context) {
 
         /** 当前教学周(1-based) */
         fun currentWeek(now: Long, weekStartMillis: Long): Int {
-            val day = 24L * 3600_000
-            return ((now - weekStartMillis) / (7 * day)).toInt() + 1
+            // 按本地日历"天"对齐再相除:weekStart 可能带 8 小时时区偏移
+            // (DatePicker 给的是 UTC 零点),直接除毫秒会在每天 0-8 点把周次算成上一周
+            fun localMidnight(t: Long): Long = java.util.Calendar.getInstance().apply {
+                timeInMillis = t
+                set(java.util.Calendar.HOUR_OF_DAY, 0)
+                set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }.timeInMillis
+            val days = (localMidnight(now) - localMidnight(weekStartMillis)) / (24L * 3600_000)
+            return (days / 7).toInt() + 1
         }
     }
 
@@ -84,6 +105,16 @@ class SettingsStore(context: Context) {
     var themePreset: String
         get() = prefs.getString(KEY_PRESET, null) ?: "NCEPU"
         set(v) = prefs.edit().putString(KEY_PRESET, v).apply()
+
+    /** 课表数据源:AUTO=联网获取 / MANUAL=手动导入的 XLS(导入后不再自动刷新) */
+    var scheduleSource: String
+        get() = prefs.getString(KEY_SCHED_SOURCE, null) ?: "AUTO"
+        set(v) = prefs.edit().putString(KEY_SCHED_SOURCE, v).apply()
+
+    /** 上次自动检查更新的时间(12 小时节流) */
+    var lastUpdateCheck: Long
+        get() = prefs.getLong(KEY_UPDATE_CHECK, 0L)
+        set(v) = prefs.edit().putLong(KEY_UPDATE_CHECK, v).apply()
 
     var fontScale: Float
         get() = prefs.getFloat(KEY_FONT, 1.0f)
@@ -133,13 +164,32 @@ class SettingsStore(context: Context) {
     var weekStartMillis: Long
         get() {
             val saved = prefs.getLong(KEY_WEEK_START, 0L)
-            if (saved > 0) return saved
+            // 归一化到本地当天 00:00(兼容旧数据里 UTC 零点=北京 8 点的存量)
+            if (saved > 0) {
+                val cal = java.util.Calendar.getInstance().apply {
+                    timeInMillis = saved
+                    set(java.util.Calendar.HOUR_OF_DAY, 0)
+                    set(java.util.Calendar.MINUTE, 0)
+                    set(java.util.Calendar.SECOND, 0)
+                    set(java.util.Calendar.MILLISECOND, 0)
+                }
+                return cal.timeInMillis
+            }
             val cal = java.util.Calendar.getInstance()
             val month = cal.get(java.util.Calendar.MONTH) + 1
             val year = cal.get(java.util.Calendar.YEAR)
+            // 锚定年份与学期归属对齐(Semester.current):
+            //   9-12 月 → 当年 9 月 1 日(秋季学期)
+            //   1-2 月  → 去年 9 月 1 日(仍是上年秋季学期,1 月不能用当年 9 月=未来时间)
+            //   3-7 月  → 当年 3 月 1 日(春季学期)
+            val (anchorYear, anchorMonth0) = when {
+                month >= 8 -> year to 8        // Calendar 0-based:8 = 九月
+                month <= 2 -> (year - 1) to 8
+                else -> year to 2              // 2 = 三月
+            }
             val anchor = java.util.Calendar.getInstance().apply {
                 clear()
-                set(if (month >= 8 || month <= 1) year else year - 1, if (month >= 8 || month <= 1) 8 else 2, 1, 0, 0, 0)
+                set(anchorYear, anchorMonth0, 1, 0, 0, 0)
             }
             // 移到周一(周一=2)
             val dow = anchor.get(java.util.Calendar.DAY_OF_WEEK)
@@ -148,7 +198,16 @@ class SettingsStore(context: Context) {
             anchor.add(java.util.Calendar.DAY_OF_MONTH, -diff)
             return anchor.timeInMillis
         }
-        set(v) = prefs.edit().putLong(KEY_WEEK_START, v).apply()
+        set(v) {
+            val cal = java.util.Calendar.getInstance().apply {
+                timeInMillis = v
+                set(java.util.Calendar.HOUR_OF_DAY, 0)
+                set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            prefs.edit().putLong(KEY_WEEK_START, cal.timeInMillis).apply()
+        }
 
     /** 课表背景图:从相册复制到内部存储,返回是否成功 */
     fun setScheduleBackground(uri: Uri): Boolean = try {
@@ -186,33 +245,61 @@ class SettingsStore(context: Context) {
         set(v) = prefs.edit().putString(KEY_WASHER_TOKEN, v).apply()
 
     /** 扫过码的洗衣机(did → deviceNo) */
-    var washerDevices: List<Pair<String, String>>
+    var washerDevices: List<SavedWasher>
         get() {
             val raw = prefs.getString(KEY_WASHER_DEVICES, null) ?: return emptyList()
             return runCatching {
                 val arr = org.json.JSONArray(raw)
                 (0 until arr.length()).mapNotNull { i ->
                     val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                    o.optString("did") to o.optString("name")
+                    SavedWasher(
+                        did = o.optString("did"),
+                        name = o.optString("name"),
+                        deviceTypeId = o.optInt("deviceTypeId", 0),
+                        storeId = o.optString("storeId", ""),
+                        status = o.optString("status", ""),
+                    )
                 }
             }.getOrDefault(emptyList())
         }
         set(v) {
             val arr = org.json.JSONArray()
-            v.forEach { (did, name) ->
-                arr.put(org.json.JSONObject().put("did", did).put("name", name))
+            v.forEach { w ->
+                arr.put(
+                    org.json.JSONObject()
+                        .put("did", w.did)
+                        .put("name", w.name)
+                        .put("deviceTypeId", w.deviceTypeId)
+                        .put("storeId", w.storeId)
+                        .put("status", w.status)
+                )
             }
             prefs.edit().putString(KEY_WASHER_DEVICES, arr.toString()).apply()
         }
 
-    fun addWasherDevice(did: String, name: String) {
-        val list = washerDevices.filter { it.first != did }.toMutableList()
-        list.add(did to name)
+    fun addWasherDevice(did: String, name: String, deviceTypeId: Int = 0, storeId: String = "", status: String = "") {
+        val old = washerDevices.firstOrNull { it.did == did }
+        val list = washerDevices.filter { it.did != did }.toMutableList()
+        list.add(
+            SavedWasher(
+                did = did, name = name.ifBlank { old?.name ?: "" },
+                deviceTypeId = if (deviceTypeId > 0) deviceTypeId else (old?.deviceTypeId ?: 0),
+                storeId = storeId.ifBlank { old?.storeId ?: "" },
+                status = status.ifBlank { old?.status ?: "" },
+            )
+        )
+        washerDevices = list
+    }
+
+    fun updateWasherStatus(did: String, status: String) {
+        val list = washerDevices.map {
+            if (it.did == did) it.copy(status = status) else it
+        }
         washerDevices = list
     }
 
     fun removeWasherDevice(did: String) {
-        washerDevices = washerDevices.filter { it.first != did }
+        washerDevices = washerDevices.filter { it.did != did }
     }
 
     /** 手动添加的饮水设备(did → 名称),存 JSON */
@@ -247,13 +334,17 @@ class SettingsStore(context: Context) {
 
     // ---------- 登录凭据 ----------
 
-    fun storeCredentials(account: String, password: String) {
-        prefs.edit().putString(KEY_ACCOUNT, account).putString(KEY_PASSWORD, password).apply()
+    /** type: "jwxt"=教务密码 / "sso"=统一身份认证密码(重启时走对应登录链路) */
+    fun storeCredentials(account: String, password: String, type: String = "jwxt") {
+        prefs.edit().putString(KEY_ACCOUNT, account).putString(KEY_PASSWORD, password)
+            .putString(KEY_CRED_TYPE, type).apply()
     }
 
     fun clearCredentials() {
-        prefs.edit().remove(KEY_ACCOUNT).remove(KEY_PASSWORD).apply()
+        prefs.edit().remove(KEY_ACCOUNT).remove(KEY_PASSWORD).remove(KEY_CRED_TYPE).apply()
     }
+
+    fun credentialType(): String = prefs.getString(KEY_CRED_TYPE, null) ?: "jwxt"
 
     fun loadCredentials(): Pair<String, String>? {
         val acc = prefs.getString(KEY_ACCOUNT, null) ?: return null
@@ -276,7 +367,7 @@ class SettingsStore(context: Context) {
                 put("room", c.room)
             })
         }
-        prefs.edit().putString(KEY_COURSE_CACHE, arr.toString()).apply()
+        prefs.edit().putString(KEY_COURSE_CACHE, arr.toString()).commit()
     }
 
     fun loadCachedCourses(): List<Course> {
@@ -359,7 +450,7 @@ class SettingsStore(context: Context) {
                     put("attr", s.attr); put("nature", s.nature)
                 })
             })
-        prefs.edit().putString(KEY_SEL_CACHE, root.toString()).apply()
+        prefs.edit().putString(KEY_SEL_CACHE, root.toString()).commit()
     }
 
     fun loadCachedSelection(): SelCache? {

@@ -20,6 +20,10 @@ object ReminderScheduler {
 
     /** 课程闹钟 requestCode = dateId*16 + sectionRow,稳定可覆盖 */
     private const val REFRESH_REQUEST_CODE = 10001
+
+    /** 考试闹钟 requestCode 区间(远离课程闹钟的 dateId*16 ≈ 3e8 量级,避免 Int 溢出碰撞) */
+    private const val EXAM_REQUEST_BASE = 200000
+    private const val EXAM_REQUEST_RANGE = 100
     const val CHANNEL_ID = "class_reminder"
 
     /**
@@ -122,7 +126,7 @@ object ReminderScheduler {
             putExtra("seat", exam.seat)
             putExtra("start", exam.startMillis)
         }
-        val requestCode = ((triggerAt / 60000).toInt() and 0x3FFFFFFF) * 16 + 100 + (idx % 8)
+        val requestCode = EXAM_REQUEST_BASE + (idx % EXAM_REQUEST_RANGE)
         val pi = PendingIntent.getBroadcast(
             context, requestCode, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
@@ -202,6 +206,15 @@ object ReminderScheduler {
                 )
                 if (pi != null) am.cancel(pi)
             }
+        }
+        // 旧的考试闹钟也一并取消(固定小区间逐一探测)
+        for (i in 0 until EXAM_REQUEST_RANGE) {
+            val pi = PendingIntent.getBroadcast(
+                context, EXAM_REQUEST_BASE + i,
+                Intent(context, ReminderReceiver::class.java),
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE,
+            )
+            if (pi != null) am.cancel(pi)
         }
         val refresh = refreshPendingIntent(context)
         am.cancel(refresh)

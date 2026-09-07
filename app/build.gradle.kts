@@ -12,10 +12,23 @@ android {
         applicationId = "com.ncepu.jw"
         minSdk = 26
         targetSdk = 35
-        versionCode = 45
-        versionName = "4.14"
+        versionCode = 46
+        versionName = "4.15"
     }
 
+    signingConfigs {
+        create("release") {
+            // 固定签名身份:本地/CI 共用同一 keystore(CI 从 Secrets 还原),
+            // 保证应用内更新覆盖安装不因签名不一致失败;缺失时回退 debug 签名
+            val ksFile = rootProject.file(System.getenv("KEYSTORE_FILE") ?: "release.keystore")
+            if (ksFile.exists()) {
+                storeFile = ksFile
+                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "android"
+                keyAlias = System.getenv("KEY_ALIAS") ?: "androiddebugkey"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: "android"
+            }
+        }
+    }
     buildTypes {
         release {
             // R8 混淆+压缩:material-icons-extended 全量图标/ML Kit/jxl 里未用到的类
@@ -23,8 +36,9 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // 个人项目:release 直接用 debug 签名,产物可直接覆盖安装
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig =
+                if (signingConfigs.getByName("release").storeFile != null) signingConfigs.getByName("release")
+                else signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -54,6 +68,10 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.materialkolor:material-kolor:2.0.0")
+    // BouncyCastle:统一身份认证登录密码 SM2(C1C3C2) 加密
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    // 支付宝 SDK:U净 orderInfo 为 PayTask.payV2 签名订单串
+    implementation("com.alipay.sdk:alipaysdk-android:15.8.42")
     // Kyant0/AndroidLiquidGlass(Compose 多平台 backdrop):液态玻璃悬浮底栏
     implementation("io.github.kyant0:backdrop:2.0.1")
     implementation("io.github.kyant0:shapes:1.2.1")

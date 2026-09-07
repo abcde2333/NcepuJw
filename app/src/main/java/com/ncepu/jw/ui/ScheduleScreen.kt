@@ -151,6 +151,7 @@ fun ScheduleScreen(
     allCourses: List<Course>,
     mode: String,
     officialWeek: Int,
+    weekStartMillis: Long = 0L,
     semesters: List<Semester>,
     selected: Semester,
     sectionTimes: List<String>,
@@ -160,6 +161,8 @@ fun ScheduleScreen(
     onBackToWeek: () -> Unit,
     onSemesterChange: (Semester) -> Unit,
     onRetry: () -> Unit,
+    onRefresh: (() -> Unit)? = null,
+    diag: String = "",
     onOpenExams: (() -> Unit)? = null,
 ) {
     var selectedCourse by remember { mutableStateOf<Course?>(null) }
@@ -252,6 +255,16 @@ fun ScheduleScreen(
                 }
             }
             Column(horizontalAlignment = Alignment.End) {
+                if (onRefresh != null) {
+                    Text(
+                        "刷新",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .clickable { onRefresh() }
+                            .padding(top = 4.dp, bottom = 2.dp),
+                    )
+                }
                 if (mode == "ALL") {
                     SemesterPicker(semesters, selected, onSemesterChange)
                 }
@@ -290,7 +303,7 @@ fun ScheduleScreen(
                             Text("第 $week 周暂无课程", color = MaterialTheme.colorScheme.outline)
                         }
                     } else {
-                        val weekDates = remember(week, officialWeek) { weekDatesFor(week, officialWeek) }
+                        val weekDates = remember(week, weekStartMillis) { weekDatesFor(week, weekStartMillis) }
                         CourseGrid(
                             courses = weekCourses,
                             showWeeks = false,
@@ -317,7 +330,18 @@ fun ScheduleScreen(
                     }
                 }
                 else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("本学期暂无课程", color = MaterialTheme.colorScheme.outline)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("本学期暂无课程", color = MaterialTheme.colorScheme.outline)
+                        if (diag.isNotBlank()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                diag,
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.outline,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -353,12 +377,16 @@ fun ScheduleScreen(
     }
 }
 
-/** 第 week 周的周一~周日日期(以官方当前周锚定) */
-private fun weekDatesFor(week: Int, officialWeek: Int): List<String> {
+/** 第 week 周的周一~周日日期:锚定设置里的"第一周周一"(weekStartMillis) */
+private fun weekDatesFor(week: Int, weekStartMillis: Long): List<String> {
     val cal = Calendar.getInstance()
-    val dow = cal.get(Calendar.DAY_OF_WEEK)
-    cal.add(Calendar.DAY_OF_MONTH, -((dow + 5) % 7)) // 本周一
-    cal.add(Calendar.DAY_OF_MONTH, (week - officialWeek) * 7)
+    if (weekStartMillis > 0) {
+        cal.timeInMillis = weekStartMillis
+    } else {
+        val dow = cal.get(Calendar.DAY_OF_WEEK)
+        cal.add(Calendar.DAY_OF_MONTH, -((dow + 5) % 7)) // 未设置:回退本周一(旧逻辑)
+    }
+    cal.add(Calendar.DAY_OF_MONTH, (week - 1) * 7)
     return List(7) { i ->
         val c = cal.clone() as Calendar
         c.add(Calendar.DAY_OF_MONTH, i)

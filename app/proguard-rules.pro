@@ -22,3 +22,15 @@
 -keep class com.ncepu.jw.data.QiangzhiCrypto { *; }
 
 # Compose/kotlinx 默认已带 consumer 规则,无需额外配置
+
+# SM2(统一身份认证登录):仅用 lightweight API,防裁剪/混淆破坏
+-keep class org.bouncycastle.crypto.engines.SM2Engine { *; }
+-keep class org.bouncycastle.crypto.params.ECDomainParameters { *; }
+-keep class org.bouncycastle.crypto.params.ECPublicKeyParameters { *; }
+-keep class org.bouncycastle.crypto.params.ParametersWithRandom { *; }
+-keep class org.bouncycastle.asn1.gm.GMNamedCurves { *; }
+-dontwarn org.bouncycastle.**
+
+# 支付宝 SDK
+-keep class com.alipay.sdk.app.** { *; }
+-keep class com.alipay.sdk.util.** { *; }

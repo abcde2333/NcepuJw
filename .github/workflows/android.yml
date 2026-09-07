@@ -26,6 +26,21 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # 还原固定签名 keystore(Secrets),保证发布 APK 签名稳定、应用内更新可覆盖安装
+      - name: Restore release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "${{ github.workspace }}/release.keystore"
+            echo "KEYSTORE_FILE=${{ github.workspace }}/release.keystore" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=android" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=androiddebugkey" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=android" >> "$GITHUB_ENV"
+          else
+            echo "::warning::未配置 KEYSTORE_BASE64,将使用 runner 生成的 debug 签名(不可用于应用内更新)"
+          fi
+
       # compileSdk 37.2(小版本 SDK):先接受许可,再装平台;失败则交给 AGP 自动安装
       - name: Ensure Android SDK components
         run: |
@@ -60,6 +75,21 @@ jobs:
 
       - name: Rename APK with tag
         run: mv apk/app-release.apk "apk/NcepuJw-${GITHUB_REF_NAME}.apk"
+
+      # 自动更新元数据:sha256 随 APK 发布同步写入 latest.json(供应用内更新校验)
+      - name: Update latest.json with apkHash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          HASH=$(sha256sum "apk/NcepuJw-${GITHUB_REF_NAME}.apk" | cut -d' ' -f1)
+          VCODE=$(grep -oP 'versionCode\s*=\s*\K\d+' app/build.gradle.kts)
+          VNAME="${GITHUB_REF_NAME#v}"
+          APKURL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/NcepuJw-${GITHUB_REF_NAME}.apk"
+          JSON=$(jq -n --arg c "$VCODE" --arg n "$VNAME" --arg u "$APKURL" --arg h "$HASH"             '{versionCode:($c|tonumber), versionName:$n, apkUrl:$u, apkHash:$h}')
+          SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json?ref=main" --jq '.sha' 2>/dev/null || true)
+          ARGS=(-f message="latest.json: ${GITHUB_REF_NAME}" -f content="$(echo "$JSON" | base64 -w0)")
+          [ -n "$SHA" ] && ARGS+=(-f sha="$SHA")
+          gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json" "${ARGS[@]}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

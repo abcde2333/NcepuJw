@@ -301,17 +301,28 @@ class UjingClient {
             return (models.firstOrNull { it.id == 1 } ?: models.first()).id
         }
 
-        /** 从订单详情(data 层)提取展示字段 */
+        /**
+         * 从订单详情(data 层)提取展示字段。
+         * payPrice:服务端给的是“元”(数值或字符串,如 2.1),格式化为 ¥x.xx(对齐参考实现)。
+         */
         fun parseOrder(detail: JSONObject?): WasherOrderInfo {
             if (detail == null) return WasherOrderInfo("", "", "", "", "", 0)
-            val fen = detail.optInt("payPrice", -1)
-            val pay = if (fen >= 0) fen2yuan(fen) else detail.optString("payPrice", "")
+            val rawPay = detail.opt("payPrice")
+            val payText = when (rawPay) {
+                null -> ""
+                is Number -> "¥" + String.format(java.util.Locale.US, "%.2f", rawPay.toDouble())
+                else -> {
+                    val t = rawPay.toString().trim()
+                    val d = t.toDoubleOrNull()
+                    if (t.isEmpty()) "" else if (d != null) "¥" + String.format(java.util.Locale.US, "%.2f", d) else t
+                }
+            }
             return WasherOrderInfo(
                 orderId = detail.str("orderId").ifBlank { detail.str("orderNo") },
                 deviceNo = detail.str("deviceNo"),
                 status = detail.str("status"),
                 statusText = detail.str("statusRemark").ifBlank { statusText(detail.str("status")) },
-                payPrice = pay,
+                payPrice = payText,
                 remainTimeSeconds = detail.optInt("remainTime", 0),
             )
         }

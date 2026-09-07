@@ -38,6 +38,7 @@ fun SelectionScreen(
     error: String?,
     rounds: List<XkRound>,
     courses: List<SelectedCourse>,
+    loggedIn: Boolean = true,
     onEnterRound: (XkRound) -> Unit,
     onRetry: () -> Unit,
 ) {
@@ -81,7 +82,21 @@ fun SelectionScreen(
         items(rounds) { round ->
             RoundCard(round, onEnterRound)
         }
-        if (rounds.isEmpty() && error == null) {
+        if (!loggedIn && error == null) {
+            item {
+                Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("尚未登录教务系统", fontWeight = FontWeight.Bold)
+                        Text(
+                            "选课轮次需要登录后查看:请到「我的」→ 登录教务系统(或统一身份认证),完成后回到本页点“刷新”",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
+            }
+        } else if (rounds.isEmpty() && error == null) {
             item {
                 Column(Modifier.padding(horizontal = 16.dp)) {
                     Text("当前没有选课轮次", color = MaterialTheme.colorScheme.outline)

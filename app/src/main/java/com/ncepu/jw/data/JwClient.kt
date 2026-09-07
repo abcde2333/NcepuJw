@@ -10,6 +10,10 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import java.util.concurrent.TimeUnit
+import org.json.JSONObject
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * 华电教务系统(强智老版 jsxsd 部署)客户端。
@@ -31,6 +35,12 @@ import okhttp3.Response
  *          返回 HTML table#dataList,一次返回全部学期,按"开课学期"列过滤
  */
 class JwClient(private val baseUrl: String = DEFAULT_BASE) {
+
+    // 统一身份认证(ids.ncepu.edu.cn,金智 authserver)协议常量
+    private val SSO_IDS = "https://ids.ncepu.edu.cn"
+    private val SSO_CLIENT_ID = "202508121120132909063"
+    private val SSO_REDIRECT_URI = "http://jwxt.hcc.edu.cn/Logon.do?method=logonByHbdldx"
+    private val SSO_RETRY_FLOWKEY = "__retry_flowkey__"
 
     companion object {
         const val DEFAULT_BASE = "https://jwxt.ncepu.edu.cn"
@@ -61,6 +71,266 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
     fun cookieHeader(): String = synchronized(cookieStore) {
         cookieStore.values.joinToString("; ") { "${it.name}=${it.value}" }
     }
+
+    /** 导入 WebView 回传的教务会话 cookie(统一身份认证登录) */
+    fun importCookies(cookieHeader: String) {
+        val domain = baseUrl.toHttpUrl().host
+        synchronized(cookieStore) {
+            for (pair in cookieHeader.split(";")) {
+                val eq = pair.indexOf("=")
+                if (eq <= 0) continue
+                val name = pair.take(eq).trim()
+                val value = pair.substring(eq + 1).trim()
+                if (name.isBlank() || value.isBlank()) continue
+                runCatching {
+                    cookieStore[name] = okhttp3.Cookie.Builder()
+                        .name(name).value(value).domain(domain).path("/").build()
+                }
+            }
+        }
+    }
+
+    /**
+     * 校验导入的会话是否有效(访问教务主界面)。
+     * 有效则更新姓名并置登录态,返回姓名(可能为空串);无效返回 null。
+     */
+    suspend fun verifyWebLogin(): String? = withContext(Dispatchers.IO) {
+        val main = get("/jsxsd/framework/xsMain.jsp").use { it.body?.string().orEmpty() }
+        if (isSessionLost(main) || main.length < 2000) return@withContext null
+        loggedIn = true
+        tryFetchName()?.let { studentName = it }
+        studentName ?: ""
+    }
+
+    // ---------- 统一身份认证直登(金智 authserver,OAuth2 壳) ----------
+    // 协议:authorize(种 COOKIE_INFO=flowKey) → api/reset/rules(SM2 公钥)
+    //   → info-query(验证码/MFA 预检) → username-password/login(SM2 C1C3C2 密文)
+    //   → 666666 + data.service → 跟 302 到教务建立 JSESSIONID。
+    // ids 与 jwxt 域隔离,用独立域名级 cookie jar;jwxt 侧走主 client 的 follow()。
+
+    /** ids 域专用 cookie jar:按 域+路径+名 存取,COOKIE_INFO/JSESSIONID 与教务互不污染 */
+    private val ssoCookieJar = object : okhttp3.CookieJar {
+        private val store = LinkedHashMap<String, okhttp3.Cookie>()
+        override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) {
+            synchronized(store) { cookies.forEach { store["${it.domain}|${it.path}|${it.name}"] = it } }
+        }
+        override fun loadForRequest(url: okhttp3.HttpUrl): List<okhttp3.Cookie> =
+            synchronized(store) { store.values.filter { it.matches(url) } }
+        fun peek(name: String): String? =
+            synchronized(store) { store.values.firstOrNull { it.name == name }?.value }
+        fun names(): List<String> =
+            synchronized(store) { store.values.map { it.name } }
+    }
+
+    private val ssoHttpClient = OkHttpClient.Builder()
+        .followRedirects(false)
+        .cookieJar(ssoCookieJar)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .build()
+
+    private fun ssoPost(url: String, body: JSONObject): okhttp3.Request =
+        Request.Builder().url(url)
+            .header("User-Agent", UA)
+            .header("Referer", "$SSO_IDS/")
+            .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+    private fun ssoGet(url: String): okhttp3.Request =
+        Request.Builder().url(url)
+            .header("User-Agent", UA)
+            .header("Referer", "$SSO_IDS/")
+            .build()
+
+    /** 全角 → 半角(与登录页 toHalfWidth 一致,SM2 明文前处理) */
+    private fun toHalfWidth(s: String): String = s.map { c ->
+        when {
+            c.code == 0x3000 -> ' '
+            c.code in 0xFF01..0xFF5E -> (c.code - 0xFEE0).toChar()
+            else -> c
+        }
+    }.joinToString("")
+
+    /** SM2 加密:国标 C1C3C2、公钥含 04 前缀,BouncyCastle 输出格式与前端逐字节一致 */
+    private fun sm2Encrypt(plain: String, publicKeyBase64: String): String {
+        val curve = org.bouncycastle.asn1.gm.GMNamedCurves.getByName("sm2p256v1")
+        val domain = org.bouncycastle.crypto.params.ECDomainParameters(curve.curve, curve.g, curve.n, curve.h)
+        val point = curve.curve.decodePoint(java.util.Base64.getDecoder().decode(publicKeyBase64))
+        val engine = org.bouncycastle.crypto.engines.SM2Engine(
+            org.bouncycastle.crypto.engines.SM2Engine.Mode.C1C3C2
+        )
+        engine.init(
+            true,
+            org.bouncycastle.crypto.params.ParametersWithRandom(
+                org.bouncycastle.crypto.params.ECPublicKeyParameters(point, domain),
+                java.security.SecureRandom(),
+            ),
+        )
+        val data = toHalfWidth(plain).toByteArray(Charsets.UTF_8)
+        return java.util.Base64.getEncoder().encodeToString(engine.processBlock(data, 0, data.size))
+    }
+
+    private fun parseFlowKey(cookieValue: String): String? = runCatching {
+        var raw = cookieValue
+        var json = runCatching { JSONObject(raw) }.getOrNull()
+        if (json == null) {
+            raw = java.net.URLDecoder.decode(raw, "UTF-8")
+            json = runCatching { JSONObject(raw) }.getOrNull() ?: return@runCatching null
+        }
+        json.optJSONObject("data")?.optString("flowKey", "")?.takeIf { it.isNotBlank() }
+            ?: json.optString("flowKey", "").takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    /** 统一身份认证直登。返回 null=成功;非 null=用户可读错误 */
+    suspend fun ssoLogin(account: String, password: String): String? = withContext(Dispatchers.IO) {
+        var lastError: String? = null
+        repeat(2) {
+            val result = ssoLoginOnce(account, password)
+            if (result == null) return@withContext null
+            lastError = result
+            if (result != SSO_RETRY_FLOWKEY) return@withContext result
+            // 180040/180033:flowKey 过期或 IP 变化,重新走一遍第 1 步
+        }
+        lastError
+    }
+
+    private suspend fun ssoLoginOnce(account: String, password: String): String? =
+        withContext(Dispatchers.IO) {
+            try {
+                // 1) authorize:种 COOKIE_INFO(含 flowKey)。
+                //    okhttp 可能因 cookie 属性拒收,先从 Set-Cookie 头直解兜底;
+                //    仍失败则把现场(HTTP 状态/cookie 名/响应体片段)放进错误信息便于定位
+                val authorizeUrl = "$SSO_IDS/authserver/oauth2/authorize?client_id=$SSO_CLIENT_ID" +
+                    "&redirect_uri=" + java.net.URLEncoder.encode(SSO_REDIRECT_URI, "UTF-8") +
+                    "&response_type=code"
+                var flowKey: String? = null
+                var diag = ""
+                ssoHttpClient.newCall(ssoGet(authorizeUrl)).execute().use { r ->
+                    val setCookies = r.headers("Set-Cookie")
+                    val ciHeader = setCookies.firstOrNull { it.trim().startsWith("COOKIE_INFO=") }
+                    if (ciHeader != null) {
+                        val v = ciHeader.trim().substringAfter("COOKIE_INFO=").substringBefore(";")
+                        flowKey = parseFlowKey(v)
+                            ?: parseFlowKey(java.net.URLDecoder.decode(v, "UTF-8"))
+                        if (flowKey == null) {
+                            // okhttp 没收下,手动塞进 jar 供后续同域请求使用
+                            runCatching {
+                                val c = okhttp3.Cookie.Builder()
+                                    .name("COOKIE_INFO").value(v).domain("ids.ncepu.edu.cn").path("/").build()
+                                ssoCookieJar.saveFromResponse(r.request.url, listOf(c))
+                            }
+                            flowKey = parseFlowKey(v) ?: parseFlowKey(java.net.URLDecoder.decode(v, "UTF-8"))
+                        }
+                    }
+                    if (flowKey == null) {
+                        diag = "HTTP ${r.code}" +
+                            " set=[" + setCookies.joinToString("|") { it.substringBefore("=").trim() } + "]" +
+                            " jar=[" + ssoCookieJar.names().joinToString("|") + "]" +
+                            " body=" + r.body?.string().orEmpty().take(80)
+                        if (r.isRedirect) diag += " loc=" + (r.header("Location") ?: "").take(80)
+                    }
+                }
+                if (flowKey.isNullOrBlank()) {
+                    return@withContext "统一认证会话建立失败($diag),请重试"
+                }
+
+                // 2) 公钥
+                val rulesBody = ssoHttpClient.newCall(
+                    ssoGet("$SSO_IDS/authserver/api/reset/rules")
+                ).execute().use { it.body?.string().orEmpty() }
+                val publicKey = runCatching {
+                    JSONObject(rulesBody).optJSONObject("data")
+                        ?.optJSONObject("encrypt")?.optString("publicKey", "")
+                }.getOrNull()
+                if (publicKey.isNullOrBlank()) return@withContext "统一认证公钥获取失败,请重试"
+
+                // 3) info-query:验证码 / MFA 预检(不阻断,仅在强制验证码时提前降级)
+                runCatching {
+                    val iq = ssoHttpClient.newCall(
+                        ssoPost("$SSO_IDS/authserver/info-query", JSONObject()
+                            .put("username", account).put("flowKey", flowKey))
+                    ).execute().use { it.body?.string().orEmpty() }
+                    val iqJson = runCatching { JSONObject(iq) }.getOrNull()
+                    if (iqJson?.optString("code", "") == "160002") {
+                        return@runCatching "该账号需要图形验证码,请使用网页登录"
+                    }
+                    null
+                }.getOrNull()?.let { return@withContext it }
+
+                // 4) 密码登录
+                val loginBody = JSONObject()
+                    .put("flowKey", flowKey)
+                    .put("username", account)
+                    .put("password", sm2Encrypt(password, publicKey))
+                val loginBodyText = ssoHttpClient.newCall(
+                    ssoPost("$SSO_IDS/authserver/username-password/login", loginBody)
+                ).execute().use { it.body?.string().orEmpty() }
+                val json = runCatching { JSONObject(loginBodyText) }.getOrNull()
+                    ?: return@withContext "统一认证响应异常"
+                val code = json.optString("code", json.optLong("code", -1L).toString())
+                val msg = json.optString("message", json.optString("msg", ""))
+                if (code != "666666") return@withContext when (code) {
+                    "170002" -> "用户名或密码错误"
+                    "170003" -> "验证码错误,请使用网页登录"
+                    "160002" -> "该账号需要图形验证码,请使用网页登录"
+                    "160001", "160074" -> "该账号启用了多因素认证,请使用网页登录"
+                    "160066" -> "需要选择代理账号,请使用网页登录"
+                    "180028" -> "登录失败次数过多,账号已锁定 30 分钟"
+                    "180029" -> "账号已被锁定,请联系管理员"
+                    "180030" -> "该账号无教务系统访问权限"
+                    "600902" -> "子账号请按 用户名+子账号名 格式输入,或使用网页登录"
+                    "180040", "180033" -> SSO_RETRY_FLOWKEY
+                    else -> if (msg.isNotBlank()) msg else "统一认证错误 code=$code"
+                }
+                val service = json.optJSONObject("data")?.optString("service", "")
+                if (service.isNullOrBlank()) return@withContext "统一认证成功但未返回回调地址"
+
+                // 5) service 是相对 IDS 的 authorize 路径:带 TGC 再请求一次,
+                //    302 到教务回调(https://jwxt.ncepu.edu.cn/Logon.do?code=...&method=logonByHbdldx)
+                var next: String? = if (service.startsWith("http")) service else SSO_IDS + service
+                var codeUrl: String? = null
+                var hops = 0
+                while (next != null && hops < 6) {
+                    val target = next
+                    val r = ssoHttpClient.newCall(ssoGet(target)).execute()
+                    val loc = r.headers("Location").firstOrNull()
+                    r.close()
+                    if (loc == null) break
+                    val abs = if (loc.startsWith("http")) loc else SSO_IDS + loc
+                    if (abs.contains("code=") && abs.contains("Logon.do")) {
+                        codeUrl = abs
+                        break
+                    }
+                    next = abs
+                    hops++
+                }
+                if (codeUrl == null) return@withContext "统一认证完成但未取得教务回调,请重试"
+
+                // 6) 教务换 code 建会话(主 client 收 JSESSIONID);别名域安全起见仍做重写。
+                //    回调前清掉旧的教务会话 cookie(残留 JSESSIONID 会让 code 回调异常);
+                //    不能用 isSessionLost 判定:成功的 xsMain.jsp 含 method=logon 字样会误判。
+                //    落地 LoginToXk(200 空体)时会话可能已建好,需再访问 xsMain 验证
+                synchronized(cookieStore) { cookieStore.clear() }
+                val callbackUrl = codeUrl.replace("jwxt.hcc.edu.cn", "jwxt.ncepu.edu.cn")
+                val (response, finalPath) = follow(baseRequest(baseUrl.toHttpUrl().resolve(callbackUrl)!!).build())
+                var landed = false
+                response.use { r ->
+                    val body = r.body?.string().orEmpty()
+                    landed = finalPath.contains("xsMain", true) && !body.contains("chucuole")
+                }
+                if (!landed && finalPath.contains("LoginToXk", true)) {
+                    val main = get("/jsxsd/framework/xsMain.jsp").use { it.body?.string().orEmpty() }
+                    landed = main.length > 2000 && !main.contains("chucuole")
+                }
+                if (!landed) {
+                    return@withContext "统一认证完成但教务会话建立失败(落地 $finalPath)"
+                }
+                tryFetchName()?.let { studentName = it }
+                null  // 成功
+            } catch (e: Exception) {
+                "统一认证失败:${e.message}"
+            }
+        }
 
     private fun baseRequest(url: HttpUrl, referer: String = "$baseUrl/"): Request.Builder =
         Request.Builder().url(url)

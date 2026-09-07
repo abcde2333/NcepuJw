@@ -125,6 +125,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var examReminderEnabled by mutableStateOf(settings.examReminderEnabled)
     var leadMinutes by mutableStateOf(settings.leadMinutes)
     var sectionTimes by mutableStateOf(settings.sectionTimes)
+    var scheduleSource by mutableStateOf(settings.scheduleSource) // AUTO/MANUAL(导入的 XLS)
 
     var account by mutableStateOf("")
     var password by mutableStateOf("")
@@ -142,6 +143,14 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var courses by mutableStateOf<List<Course>>(emptyList())     // 当前显示(周视图=本地过滤)
     var schedMode by mutableStateOf("WEEK")      // WEEK=周视图(本地过滤) / ALL=学期全量
     var officialWeek by mutableStateOf(0)        // 官方当前周(教务系统计算,加载时取一次)
+    // 注意:以下状态必须在 init 之前声明(Kotlin 按声明顺序初始化,
+    // init/其协程会读写它们;声明在 init 之后会导致启动期 NPE 崩溃)
+    var schedDiag by mutableStateOf("")
+
+    // ---------- 应用内更新(镜像站加速) ----------
+    var updateState by mutableStateOf<com.ncepu.jw.update.Updater.State>(
+        com.ncepu.jw.update.Updater.State.Idle
+    )
     var selectedWeek by mutableStateOf(0)        // 当前查看的周
     var schedLoaded by mutableStateOf(false)
 
@@ -193,11 +202,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var skippedLogin by mutableStateOf(false)   // 跳过教务登录(离线/仅用饮水机)
 
     init {
-        // 首屏直出:先把本地缓存的课表/选课灌进状态(弱网/校外/未登录不再白屏转圈),
-        // 之后登录成功时会静默刷新覆盖
-        viewModelScope.launch(Dispatchers.IO) {
-            fallBackToCache()
-            // 选课中心同理:缓存直出,避免频繁切页触发风控
+        // 首屏直出:同步预载(SharedPreferences 读毫秒级),保证首帧之前
+        // 课表/选课缓存已就绪——异步预载存在首帧竞态,导入 XLS 后重启尤其明显
+        runCatching { fallBackToCache() }
+        runCatching {
             settings.loadCachedSelection()?.let { sel ->
                 if (xkRounds.isEmpty()) {
                     xkRounds = sel.rounds
@@ -207,6 +215,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 }
             }
         }
+        // 启动时自动检查更新(12 小时节流,镜像站加速)
+        viewModelScope.launch(Dispatchers.IO) { checkForUpdate(force = false) }
         // 冷却倒计时(饮水/洗衣机短信共用)
         viewModelScope.launch {
             while (true) {
@@ -418,40 +428,106 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 }
                 // 下单必需的 deviceTypeId 来自扫码结果(非套餐接口)
                 val deviceTypeId = result.optInt("deviceTypeId", 0)
-                val info = ujing.programInfo(washerToken, deviceId)
-                if (!info.ok) {
-                    washerState = washerState.copy(loading = false, message = "套餐获取失败:" + UjingClient.readable(info.code, info.msg))
-                    return@launch
+                val err = loadWasherProgram(deviceId, deviceTypeId, "", status)
+                if (err != null) {
+                    washerState = washerState.copy(loading = false, message = err)
                 }
-                val storeId = info.json?.optString("storeId", "") ?: ""
-                washerScanned[deviceId] = Pair(deviceTypeId, storeId)
-                // 记住这台设备(下次免扫码)
-                settings.addWasherDevice(deviceId, info.json?.optString("deviceNo", "") ?: "")
-                washerState = washerState.copy(savedWashers = settings.washerDevices)
-                val models = UjingClient.Parsers.parseModels(info.json)
-                val defaultId = UjingClient.Parsers.defaultModelId(models)
-                washerState = washerState.copy(
-                    loading = false,
-                    scannedDevice = deviceId,
-                    deviceSummary = (info.json?.optString("storeName", "") ?: "") + " " +
-                        (info.json?.optString("deviceTypeName", "") ?: ""),
-                    models = models,
-                    selectedModelId = defaultId,
-                    // 加购组跟随所选模式,默认全部"不添加"
-                    selectedAdditions = models.firstOrNull { it.id == defaultId }
-                        ?.additions?.associate { it.key to null } ?: emptyMap(),
-                    selectedTemperatureId = 1,
-                    message = null,
-                )
             } catch (e: Exception) {
                 washerState = washerState.copy(loading = false, message = "识别异常:" + e.message)
             }
         }
     }
 
+    /** 选择已保存的洗衣机:直接拉套餐,不走扫码接口 */
+    fun washerSelectSaved(did: String) {
+        if (washerToken.isBlank()) {
+            washerState = washerState.copy(message = "请先登录 U净账号")
+            return
+        }
+        val saved = settings.washerDevices.firstOrNull { it.did == did }
+        washerState = washerState.copy(
+            loading = true, message = null, scannedDevice = did,
+            models = emptyList(), selectedModelId = null,
+            selectedAdditions = emptyMap(),
+        )
+        viewModelScope.launch {
+            try {
+                val err = loadWasherProgram(did, saved?.deviceTypeId ?: 0, saved?.storeId ?: "")
+                if (err != null) {
+                    washerState = washerState.copy(loading = false, message = err)
+                }
+            } catch (e: Exception) {
+                washerState = washerState.copy(loading = false, message = "获取设备信息失败:" + e.message)
+            }
+        }
+    }
+
+    /**
+     * 拉取设备套餐并更新选中状态。返回 null=成功,非 null=错误信息。
+     * 同时持久化 deviceTypeId/storeId/状态,并探测设备是否忙碌。
+     */
+    private suspend fun loadWasherProgram(
+        deviceId: String,
+        knownTypeId: Int,
+        knownStoreId: String,
+        scannedStatus: String = "",
+    ): String? {
+        val info = ujing.programInfo(washerToken, deviceId)
+        if (!info.ok) {
+            return "套餐获取失败:" + UjingClient.readable(info.code, info.msg)
+        }
+        val storeId = info.json?.optString("storeId", knownStoreId) ?: knownStoreId
+        washerScanned[deviceId] = Pair(knownTypeId, storeId)
+        // 记住这台设备(含下单必需信息),下次免扫码
+        settings.addWasherDevice(deviceId, info.json?.optString("deviceNo", "") ?: "", knownTypeId, storeId, scannedStatus)
+        washerState = washerState.copy(savedWashers = settings.washerDevices)
+        val models = UjingClient.Parsers.parseModels(info.json)
+        val defaultId = UjingClient.Parsers.defaultModelId(models)
+        washerState = washerState.copy(
+            loading = false,
+            scannedDevice = deviceId,
+            deviceSummary = (info.json?.optString("storeName", "") ?: "") + " " +
+                (info.json?.optString("deviceTypeName", "") ?: ""),
+            models = models,
+            selectedModelId = defaultId,
+            selectedAdditions = models.firstOrNull { it.id == defaultId }
+                ?.additions?.associate { it.key to null } ?: emptyMap(),
+            selectedTemperatureId = 1,
+            message = null,
+        )
+        return null
+    }
+
+    /** 活跃订单状态(30 准备中 / 40 运行中)→ 设备忙碌 */
+    private val activeOrderDevices = mutableSetOf<String>()
+
+    fun updateActiveOrder(deviceId: String, status: String) {
+        activeOrderDevices.clear()
+        if (status == "30" || status == "40") activeOrderDevices.add(deviceId)
+        settings.updateWasherStatus(deviceId, if (status == "30" || status == "40") "忙碌" else "空闲")
+        washerState = washerState.copy(savedWashers = settings.washerDevices)
+    }
+
+    /** 是否使用手动导入的 XLS 课表(开启=不联网刷新;关闭=恢复联网获取) */
+    fun setUseImportedXls(enabled: Boolean) {
+        scheduleSource = if (enabled) "MANUAL" else "AUTO"
+        settings.scheduleSource = if (enabled) "MANUAL" else "AUTO"
+        if (enabled) {
+            // 立即应用导入的数据
+            fallBackToCache()
+            schedMode = "WEEK"
+            if (selectedWeek <= 0) selectedWeek = officialWeek.coerceAtLeast(1)
+        } else if (loggedIn) {
+            loadSchedule(force = true)  // 关闭导入,恢复联网获取
+        }
+    }
+
     fun washerCreateOrder() {
         val deviceId = washerState.scannedDevice ?: return
         val scanned = washerScanned[deviceId]
+            ?: settings.washerDevices.firstOrNull { it.did == deviceId }
+                ?.takeIf { it.deviceTypeId > 0 }
+                ?.let { Pair(it.deviceTypeId, it.storeId) }
         if (scanned == null) {
             washerState = washerState.copy(message = "请先识别设备")
             return
@@ -478,38 +554,46 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             val orderId = r.json?.optString("orderId", "") ?: ""
             val detail = ujing.orderDetail(washerToken, orderId)
             val order = UjingClient.Parsers.parseOrder(detail.json)
+            updateActiveOrder(deviceId, order.status)
             washerState = washerState.copy(loading = false, currentOrder = order)
         }
     }
 
-    fun washerPay() {
+    fun washerPay(activity: android.app.Activity) {
         val order = washerState.currentOrder ?: return
         washerState = washerState.copy(loading = true, message = null)
         viewModelScope.launch {
             val r = ujing.paymentArguments(washerToken, order.orderId)
             val payInfo = r.json?.optJSONObject("payInfo")
             val orderInfo = payInfo?.optString("orderInfo", "") ?: ""
-            if (r.ok && orderInfo.isNotBlank()) {
-                washerState = washerState.copy(loading = false, payUrl = "已生成支付宝参数")
-                openAlipay(orderInfo)
-            } else {
-                val h5 = payInfo?.optString("h5_url", "") ?: ""
+            if (!r.ok || orderInfo.isBlank()) {
                 washerState = washerState.copy(
                     loading = false,
-                    message = if (h5.isNotBlank()) "请用浏览器打开 H5 支付链接完成支付" else "支付参数失败:" + UjingClient.readable(r.code, r.msg),
+                    message = "支付参数获取失败:" + UjingClient.readable(r.code, r.msg),
                 )
+                return@launch
             }
-        }
-    }
-
-    private fun openAlipay(orderInfo: String) {
-        try {
-            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
-            intent.data = android.net.Uri.parse("alipays://platformapi/startapp?saId=10000007&orderSuffix=" +
-                java.net.URLEncoder.encode(orderInfo, "UTF-8"))
-            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-            getApplication<android.app.Application>().startActivity(intent)
-        } catch (_: Exception) {
+            // PayTask 阻塞调用,需在后台线程;orderInfo 是支付宝 SDK 签名订单串
+            val result = withContext(Dispatchers.IO) {
+                com.alipay.sdk.app.PayTask(activity).payV2(orderInfo, true)
+            }
+            val paid = result.contains("resultStatus={9000}")
+            val refreshed = ujing.orderDetail(washerToken, order.orderId)
+            val newOrder = UjingClient.Parsers.parseOrder(refreshed.json)
+            updateActiveOrder(washerState.scannedDevice ?: "", newOrder.status)
+            washerState = washerState.copy(
+                loading = false,
+                currentOrder = newOrder,
+                message = if (paid) {
+                    if (washerState.autoStartAfterPay) "支付成功,3 秒后自动启动洗衣机" else "支付成功"
+                } else "支付未完成,可在订单中重试",
+            )
+            if (paid && washerState.autoStartAfterPay) {
+                kotlinx.coroutines.delay(3000)
+                ujing.startOrder(washerToken, order.orderId)
+                val d2 = ujing.orderDetail(washerToken, order.orderId)
+                washerState = washerState.copy(currentOrder = UjingClient.Parsers.parseOrder(d2.json))
+            }
         }
     }
 
@@ -588,7 +672,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         val creds = settings.loadCredentials()
         if (creds != null && !loggedIn) {
             account = creds.first; password = creds.second
-            doLogin()
+            // 按存储的凭据类型走对应登录链路(统一认证密码 ≠ 教务密码)
+            if (settings.credentialType() == "sso") doSsoLogin() else doLogin()
         }
     }
 
@@ -601,13 +686,52 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             if (err == null) {
                 loggedIn = true
                 name = client.studentName
-                settings.storeCredentials(account.trim(), password)
-                // 缓存已上屏则后台静默刷新,否则正常加载(带 loading)
+                settings.storeCredentials(account.trim(), password, "jwxt")
+                // 课表策略:仅缓存为空时联网加载;刷新只发生在切学期/手动刷新
+                if (allCourses.isEmpty()) loadSchedule()
+                loadGrades()
+            } else {
+                loginError = err
+            }
+        }
+    }
+
+    /** 统一身份认证协议直登(账号密码走 ids.ncepu.edu.cn) */
+    fun doSsoLogin() {
+        loginLoading = true
+        loginError = null
+        viewModelScope.launch {
+            val err = client.ssoLogin(account.trim(), password)
+            loginLoading = false
+            if (err == null) {
+                loggedIn = true
+                name = client.studentName
+                // 记住统一认证凭据,重启时自动走协议直登
+                settings.storeCredentials(account.trim(), password, "sso")
                 loadSchedule(force = allCourses.isNotEmpty(), silent = allCourses.isNotEmpty())
                 loadGrades()
             } else {
                 loginError = err
             }
+        }
+    }
+
+    /** 统一身份认证(WebView)登录成功:导入会话 cookie 并校验 */
+    fun completeWebLogin(cookieHeader: String) {
+        loginLoading = true
+        loginError = null
+        viewModelScope.launch {
+            client.importCookies(cookieHeader)
+            val verified = client.verifyWebLogin()
+            loginLoading = false
+            if (verified == null) {
+                loginError = "统一认证会话无效,请重试"
+                return@launch
+            }
+            loggedIn = true
+            if (verified.isNotBlank()) name = verified
+            loadSchedule(force = allCourses.isNotEmpty(), silent = allCourses.isNotEmpty())
+            loadGrades()
         }
     }
 
@@ -621,6 +745,11 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             schedMode = "WEEK"
             selectedWeek = officialWeek
             courses = allCourses
+            return
+        }
+        // 使用导入的 XLS:不联网刷新,直接回退缓存(登录与否均如此;force 才覆盖)
+        if (settings.scheduleSource == "MANUAL" && !force) {
+            fallBackToCache()
             return
         }
         // 未登录:请求必然失败(无会话,302),不浪费请求也不触发风控,直接回退缓存
@@ -663,6 +792,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 schedLoaded = true
                 name = client.studentName ?: name
                 settings.cacheCourses(full)
+                // 手动刷新/切学期重新联网后,恢复自动数据源(覆盖手动导入的固定数据)
+                if (force) settings.scheduleSource = "AUTO"
                 // 官方当前周:周四锚定(与三请求并发);拿不到则本地推断
                 officialWeek = weekDef.await() ?: localCurrentWeek()
                 // 已有界面在显示时(静默刷新)保留用户所在周,否则跳到当前周
@@ -687,15 +818,69 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
+    /** force=false 时 12 小时只自动检查一次 */
+    fun checkForUpdate(force: Boolean = false) {
+        if (updateState is com.ncepu.jw.update.Updater.State.Checking ||
+            updateState is com.ncepu.jw.update.Updater.State.Downloading
+        ) return
+        val now = System.currentTimeMillis()
+        if (!force && now - settings.lastUpdateCheck < 12 * 3600_000L) return
+        updateState = com.ncepu.jw.update.Updater.State.Checking
+        viewModelScope.launch {
+            settings.lastUpdateCheck = now
+            val info = com.ncepu.jw.update.Updater.fetchLatest()
+            if (info == null) {
+                updateState = com.ncepu.jw.update.Updater.State.Failed("检查失败,请检查网络")
+                return@launch
+            }
+            updateState =
+                if (info.versionCode > com.ncepu.jw.update.Updater.currentVersionCode(getApplication())) {
+                    com.ncepu.jw.update.Updater.State.Available(info)
+                } else {
+                    com.ncepu.jw.update.Updater.State.Latest(info.versionName)
+                }
+        }
+    }
+
+    fun downloadUpdate() {
+        val info = (updateState as? com.ncepu.jw.update.Updater.State.Available)?.info ?: return
+        if (updateState is com.ncepu.jw.update.Updater.State.Downloading) return
+        updateState = com.ncepu.jw.update.Updater.State.Downloading(0)
+        viewModelScope.launch {
+            try {
+                val file = com.ncepu.jw.update.Updater.downloadApk(getApplication(), info) { p ->
+                    updateState = com.ncepu.jw.update.Updater.State.Downloading(p)
+                }
+                updateState = com.ncepu.jw.update.Updater.State.Downloaded(file, info.versionName)
+            } catch (e: Exception) {
+                updateState = com.ncepu.jw.update.Updater.State.Failed("下载失败:${e.message}")
+            }
+        }
+    }
+
+    fun onUpdateAction() {
+        when (val s = updateState) {
+            is com.ncepu.jw.update.Updater.State.Available -> downloadUpdate()
+            is com.ncepu.jw.update.Updater.State.Downloaded -> com.ncepu.jw.update.Updater.install(getApplication(), s.file)
+            is com.ncepu.jw.update.Updater.State.Failed, is com.ncepu.jw.update.Updater.State.Idle -> checkForUpdate(force = true)
+            else -> {}
+        }
+    }
+
+    private fun schedDiagText(): String =
+        "cache=${settings.loadCachedCourses().size}, source=${settings.scheduleSource}, " +
+            "loggedIn=$loggedIn, credType=${settings.credentialType()}"
+
     /** 未登录/加载失败时回退本地缓存课表;返回是否已有可显示的课表 */
     private fun fallBackToCache(): Boolean {
-        if (allCourses.isNotEmpty()) return true
+        if (allCourses.isNotEmpty()) { schedDiag = ""; return true }
         val cached = settings.loadCachedCourses()
-        if (cached.isEmpty()) return false
+        if (cached.isEmpty()) { schedDiag = schedDiagText() + ", cacheFile=空"; return false }
         allCourses = cached
         courses = cached
         schedLoaded = true
         schedError = null
+        schedDiag = ""
         if (officialWeek <= 0) officialWeek = localCurrentWeek()
         if (selectedWeek <= 0) selectedWeek = officialWeek
         return true
@@ -730,7 +915,45 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     fun changeSemester(sem: Semester) {
         schedSem = sem
+        settings.scheduleSource = "AUTO"  // 切学期重新联网获取
         loadSchedule(force = true)
+    }
+
+    /** 手动导入课表 XLS(教务"打印课表"导出的 .xls);导入后不再自动刷新 */
+    fun importScheduleXls(uri: android.net.Uri) {
+        viewModelScope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) {
+                    getApplication<android.app.Application>().contentResolver
+                        .openInputStream(uri)?.use { it.readBytes() }
+                } ?: throw JwException("无法读取文件")
+                if (bytes.size < 8 || bytes[0] != 0xD0.toByte() || bytes[1] != 0xCF.toByte()) {
+                    throw JwException("不是有效的 XLS 文件(请用教务「打印课表」导出的 .xls)")
+                }
+                val parsed = com.ncepu.jw.data.ScheduleXlsParser.parse(bytes)
+                if (parsed.isEmpty()) throw JwException("文件中未解析出课程")
+                allCourses = parsed
+                courses = parsed
+                schedLoaded = true
+                schedError = null
+                schedMode = "WEEK"
+                if (officialWeek <= 0) officialWeek = localCurrentWeek()
+                selectedWeek = officialWeek
+                settings.scheduleSource = "MANUAL"
+                settings.cacheCourses(parsed)
+                if (settings.reminderEnabled) {
+                    ReminderScheduler.reschedule(getApplication())
+                }
+                android.widget.Toast.makeText(
+                    getApplication(), "已导入 ${parsed.size} 条课程记录", android.widget.Toast.LENGTH_SHORT
+                ).show()
+            } catch (e: Exception) {
+                schedError = e.message ?: "导入失败"
+                android.widget.Toast.makeText(
+                    getApplication(), "导入失败:${e.message}", android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     }
 
     fun loadGrades() {
@@ -829,29 +1052,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 }
 
 /** 未登录提示(课表/成绩页) */
-@Composable
-private fun LoginRequired(onGoLogin: () -> Unit) {
-    Column(
-        Modifier.fillMaxSize().padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-    ) {
-        Text("未登录教务系统", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.padding(8.dp))
-        Text(
-            "课表、成绩等教务功能需要登录后使用\n饮水机功能可在底部“饮水”标签直接使用\n如校外使用教务，请先连接 EasyConnect",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            lineHeight = 20.sp,
-        )
-        Spacer(Modifier.padding(20.dp))
-        androidx.compose.material3.Button(onClick = onGoLogin) {
-            Text("去登录教务系统")
-        }
-    }
-}
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -952,7 +1152,22 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.StartActivityForResult(),
         ) { vm.loadSelection() }
 
+        // 统一身份认证登录:WebView 完成 SSO 后回传教务会话
+        val ssoLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult(),
+        ) { result ->
+            val cookies = WebViewActivity.ssoCookies
+            WebViewActivity.ssoCookies = null
+            if (result.resultCode == android.app.Activity.RESULT_OK && !cookies.isNullOrBlank()) {
+                vm.completeWebLogin(cookies)
+            }
+        }
+
         var pendingCropUri by mutableStateOf<android.net.Uri?>(null)
+
+        val xlsPicker = rememberLauncherForActivityResult(
+            ActivityResultContracts.GetContent(),
+        ) { uri -> uri?.let { vm.importScheduleXls(it) } }
 
         val bgPicker = rememberLauncherForActivityResult(
             ActivityResultContracts.GetContent(),
@@ -1082,6 +1297,7 @@ class MainActivity : ComponentActivity() {
                             onSendSms = { vm.washerRequestCaptcha() },
                             onLogin = { vm.doWasherLogin() },
                             onScanOrInput = { vm.washerScan(it) },
+                            onSelectSaved = { vm.washerSelectSaved(it) },
                             onScan = { navController.navigate("washerscan") },
                             onSelectModel = { id ->
                                 val models = vm.washerState.models
@@ -1101,7 +1317,8 @@ class MainActivity : ComponentActivity() {
                                 )
                             },
                             onCreateOrder = { vm.washerCreateOrder() },
-                            onPay = { vm.washerPay() },
+                            onPay = { vm.washerPay(this@MainActivity) },
+                            onAutoStartChange = { vm.washerState = vm.washerState.copy(autoStartAfterPay = it) },
                             onRefreshOrder = { vm.washerRefresh() },
                             onStartWash = { vm.washerStart() },
                             onBack = { navController.popBackStack() },
@@ -1186,13 +1403,25 @@ class MainActivity : ComponentActivity() {
                             sectionTimes = vm.sectionTimes,
                             weekStartMillis = appearance.weekStartMillis,
                             exactAlarmGranted = isExactAlarmGranted(ctx),
+                            scheduleSource = vm.scheduleSource,
+                            onImportScheduleXls = { xlsPicker.launch("*/*") },
+                            onUseImportedChange = { vm.setUseImportedXls(it) },
+                            update = vm.updateState,
+                            currentVersion = com.ncepu.jw.update.Updater.currentVersionName(ctx),
+                            onCheckUpdate = { vm.checkForUpdate(force = true) },
+                            onUpdateAction = { vm.onUpdateAction() },
                             onThemeModeChange = onThemeModeChange,
                             onPresetChange = onPresetChange,
                             onDynamicColorChange = onDynamicColorChange,
                             onFontScaleChange = onFontScaleChange,
                             onNavShapeChange = { s ->
                                 vm.settings.navShape = s
-                                onAppearanceChange(appearance.copy(navShape = s))
+                                // 液态玻璃只在悬浮形状下可用;切回标准时自动改实色
+                                val m = if (s == com.ncepu.jw.data.NavBarShape.STANDARD &&
+                                    appearance.navMaterial == NavMaterial.LIQUID
+                                ) NavMaterial.SOLID else appearance.navMaterial
+                                if (m != appearance.navMaterial) vm.settings.navMaterial = m
+                                onAppearanceChange(appearance.copy(navShape = s, navMaterial = m))
                             },
                             onNavMaterialChange = { m ->
                                 vm.settings.navMaterial = m
@@ -1253,6 +1482,13 @@ class MainActivity : ComponentActivity() {
                             onPasswordChange = { vm.password = it },
                             onLogin = { vm.doLogin() },
                             onSkip = { navController.popBackStack() },
+                            onSsoLogin = { vm.doSsoLogin() },
+                            onSsoWebLogin = {
+                                ssoLauncher.launch(
+                                    android.content.Intent(ctx, WebViewActivity::class.java)
+                                        .putExtra(WebViewActivity.EXTRA_SSO, true)
+                                )
+                            },
                         )
                     }
                 }
@@ -1383,7 +1619,7 @@ class MainActivity : ComponentActivity() {
                             when (t) {
                             0 -> if (vm.allCourses.isEmpty() && !vm.skippedLogin) vm.loadSchedule()
                             1 -> vm.loadWaterDevices(silent = vm.waterState.devices.isNotEmpty())
-                            2 -> vm.loadSelection()
+                            2 -> if (vm.loggedIn) vm.loadSelection()
                             }
                         },
                         isDark = isDark,
@@ -1408,11 +1644,13 @@ class MainActivity : ComponentActivity() {
                         label = "tab",
                     ) { t ->
                         when (t) {
-                            0 -> if (!vm.loggedIn) LoginRequired(onGoLogin = onOpenJwxtLogin) else ScheduleScreen(
+                            0 -> ScheduleScreen(
                                 loading = vm.schedLoading,
                                 error = vm.schedError,
                                 allCourses = vm.allCourses,
+                                diag = vm.schedDiag,
                                 mode = vm.schedMode,
+                                weekStartMillis = appearance.weekStartMillis,
                                 officialWeek = vm.officialWeek,
                                 semesters = vm.semesters,
                                 selected = vm.schedSem,
@@ -1423,6 +1661,7 @@ class MainActivity : ComponentActivity() {
                                 onBackToWeek = { vm.backToCurrentWeek() },
                                 onSemesterChange = { vm.changeSemester(it) },
                                 onRetry = { vm.loadSchedule(force = true) },
+                                onRefresh = { vm.loadSchedule(force = true) },
                                 onOpenExams = onOpenExams,
                             )
                             1 -> WaterScreen(
@@ -1446,6 +1685,7 @@ class MainActivity : ComponentActivity() {
                                 scanResult = vm.waterScanResult,
                             )
                             2 -> SelectionScreen(
+                                loggedIn = vm.loggedIn,
                                 loading = vm.selLoading,
                                 error = vm.selError,
                                 rounds = vm.xkRounds,
@@ -1457,6 +1697,8 @@ class MainActivity : ComponentActivity() {
                                 account = vm.account,
                                 name = vm.name,
                                 loggedIn = vm.loggedIn,
+                                update = vm.updateState,
+                                onUpdateAction = { vm.onUpdateAction() },
                                 onOpenJwxtLogin = onOpenJwxtLogin,
                                 onOpenSettings = onOpenSettings,
                                 onOpenPyfa = onOpenPyfa,

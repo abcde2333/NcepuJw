@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.LocalLaundryService
 import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -35,6 +36,8 @@ fun ProfileScreen(
     loggedIn: Boolean = true,
     onOpenJwxtLogin: () -> Unit = {},
     onOpenSettings: () -> Unit,
+    update: com.ncepu.jw.update.Updater.State? = null,
+    onUpdateAction: () -> Unit = {},
     onOpenPyfa: () -> Unit,
     onOpenWasher: () -> Unit,
     onOpenGrades: () -> Unit,
@@ -73,6 +76,17 @@ fun ProfileScreen(
             }
         }
 
+        // 更新横幅(有新版本/下载完成时显示)
+        when (val u = update) {
+            is com.ncepu.jw.update.Updater.State.Available -> UpdateBanner(
+                "发现新版本 v${u.info.versionName} · 点击下载", onUpdateAction)
+            is com.ncepu.jw.update.Updater.State.Downloading -> UpdateBanner(
+                "新版本下载中 ${u.progress}%", null)
+            is com.ncepu.jw.update.Updater.State.Downloaded -> UpdateBanner(
+                "安装包已就绪 · 点击安装", onUpdateAction)
+            else -> {}
+        }
+
         // 功能入口(独立图标区分)
         if (loggedIn) {
             EntryCard("成绩查询", Icons.Filled.BarChart, onOpenGrades)
@@ -108,6 +122,34 @@ fun ProfileScreen(
                 .align(Alignment.CenterHorizontally)
                 .padding(8.dp),
         )
+    }
+}
+
+@Composable
+private fun UpdateBanner(text: String, onClick: (() -> Unit)?) {
+    Card(
+        onClick = { onClick?.invoke() },
+        enabled = onClick != null,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                androidx.compose.material.icons.Icons.Filled.SystemUpdate,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text,
+                modifier = Modifier.padding(start = 12.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+            )
+        }
     }
 }
 
