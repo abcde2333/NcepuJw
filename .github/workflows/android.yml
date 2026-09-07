@@ -97,11 +97,12 @@ jobs:
           JSON=$(jq -n --arg c "$VCODE" --arg n "$VNAME" --arg u "$APKURL" --arg h "$HASH"             '{versionCode:($c|tonumber), versionName:$n, apkUrl:$u, apkHash:$h}')
           SHA=""
           SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json?ref=main" --jq '.sha' 2>/dev/null) || SHA=""
-          ARGS=(-f message="latest.json: ${GITHUB_REF_NAME}" -f content="$(echo "$JSON" | base64 -w0)")
+          # contents API 必须 PUT(POST 会 404);更新需带现有文件 sha
+          APIARGS=(-f message="latest.json: ${GITHUB_REF_NAME}" -f content="$(echo "$JSON" | base64 -w0)")
           if [ -n "$SHA" ]; then
-            ARGS+=(-f sha="$SHA")
+            APIARGS+=(-f sha="$SHA")
           fi
-          gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json" "${ARGS[@]}"
+          gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/latest.json" "${APIARGS[@]}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
