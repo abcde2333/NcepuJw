@@ -48,6 +48,12 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.2" \
             || echo "::warning::sdkmanager 安装 android-37.2 失败,转由 AGP 自动安装"
 
+      - name: Read version
+        id: ver
+        run: |
+          echo "vcode=$(grep -oP 'versionCode\s*=\s*\K\d+' app/build.gradle.kts)" >> "$GITHUB_OUTPUT"
+          echo "vname=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)" >> "$GITHUB_OUTPUT"
+
       - name: Build release APK (R8)
         run: ./gradlew assembleRelease --stacktrace
 
@@ -82,8 +88,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           HASH=$(sha256sum "apk/NcepuJw-${GITHUB_REF_NAME}.apk" | cut -d' ' -f1)
-          VCODE=$(grep -oP 'versionCode\s*=\s*\K\d+' app/build.gradle.kts)
-          VNAME="${GITHUB_REF_NAME#v}"
+          VCODE="${{ needs.build.outputs.vcode }}"
+          VNAME="${{ needs.build.outputs.vname }}"
           APKURL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/NcepuJw-${GITHUB_REF_NAME}.apk"
           JSON=$(jq -n --arg c "$VCODE" --arg n "$VNAME" --arg u "$APKURL" --arg h "$HASH"             '{versionCode:($c|tonumber), versionName:$n, apkUrl:$u, apkHash:$h}')
           SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json?ref=main" --jq '.sha' 2>/dev/null || true)
