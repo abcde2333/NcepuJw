@@ -53,6 +53,7 @@ class SettingsStore(context: Context) {
         const val KEY_COURSE_CACHE = "course_cache"
         const val KEY_WATER_TOKEN = "water_token"
         const val KEY_WATER_DEVICES = "water_devices"
+        const val KEY_WATER_ORDER = "water_order"
         const val KEY_WASHER_TOKEN = "washer_token"
         const val KEY_WASHER_DEVICES = "washer_devices"
         const val KEY_EXAM_CACHE = "exam_cache"
@@ -335,6 +336,28 @@ class SettingsStore(context: Context) {
 
     fun removeWaterDevice(did: String) {
         waterDevices = waterDevices.filter { it.first != did }
+    }
+
+    /** 饮水设备自定义顺序(did 序列,长按排序持久化)。空=未自定义。 */
+    var waterOrder: List<String>
+        get() {
+            val raw = prefs.getString(KEY_WATER_ORDER, null) ?: return emptyList()
+            return runCatching {
+                val arr = org.json.JSONArray(raw)
+                (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
+            }.getOrDefault(emptyList())
+        }
+        set(v) {
+            val arr = org.json.JSONArray()
+            v.forEach { arr.put(it) }
+            prefs.edit().putString(KEY_WATER_ORDER, arr.toString()).apply()
+        }
+
+    /** 按已存顺序排列设备;未知 did 追加在后(稳定)。order 为空则原样返回。 */
+    fun <T> applyWaterOrder(items: List<T>, didOf: (T) -> String): List<T> {
+        val order = waterOrder
+        if (order.isEmpty() || items.isEmpty()) return items
+        return items.sortedBy { d -> order.indexOf(didOf(d)).let { if (it < 0) Int.MAX_VALUE else it } }
     }
 
     // ---------- 登录凭据 ----------

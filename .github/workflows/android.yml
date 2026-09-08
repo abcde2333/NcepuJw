@@ -94,7 +94,9 @@ jobs:
           VCODE="${{ needs.build.outputs.vcode }}"
           VNAME="${{ needs.build.outputs.vname }}"
           APKURL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/NcepuJw-${GITHUB_REF_NAME}.apk"
-          JSON=$(jq -n --arg c "$VCODE" --arg n "$VNAME" --arg u "$APKURL" --arg h "$HASH"             '{versionCode:($c|tonumber), versionName:$n, apkUrl:$u, apkHash:$h}')
+          # 更新日志:从 main 根目录 RELEASE_NOTES.txt 读取,写入 latest.json.notes 供 App 更新弹窗展示
+          NOTES=$(curl -s --max-time 25 "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/RELEASE_NOTES.txt" || true)
+          JSON=$(jq -n --arg c "$VCODE" --arg n "$VNAME" --arg u "$APKURL" --arg h "$HASH" --arg notes "$NOTES"             '{versionCode:($c|tonumber), versionName:$n, apkUrl:$u, apkHash:$h, notes:$notes}')
           SHA=""
           SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json?ref=main" --jq '.sha' 2>/dev/null) || SHA=""
           # contents API 必须 PUT(POST 会 404);更新需带现有文件 sha
@@ -103,6 +105,12 @@ jobs:
             APIARGS+=(-f sha="$SHA")
           fi
           gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/latest.json" "${APIARGS[@]}"
+
+      # 清 jsDelivr CDN 缓存:老版本 App 按"第一个有效源"取 latest.json,jsDelivr 会缓存
+      # @main 文件较久,不清就可能长时间仍返回旧版本。清完 + 等待刷新,老客户端才能发现新版。
+      - name: Purge jsDelivr cache
+        run: |
+          curl -s --max-time 25 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@main/latest.json" || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

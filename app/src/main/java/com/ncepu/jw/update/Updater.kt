@@ -4,6 +4,9 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -38,7 +41,13 @@ object Updater {
         "",
     )
 
-    data class Info(val versionCode: Long, val versionName: String, val apkUrl: String, val apkHash: String = "")
+    data class Info(
+        val versionCode: Long,
+        val versionName: String,
+        val apkUrl: String,
+        val apkHash: String = "",
+        val notes: String = "",          // 该版本更新日志(纯文本,来自 latest.json,供更新弹窗展示)
+    )
 
     sealed class State {
         data object Idle : State()
@@ -57,6 +66,13 @@ object Updater {
         .callTimeout(10, TimeUnit.MINUTES)
         .build()
 
+    // 元数据查询专用:小 JSON,短超时,单个镜像挂了不拖慢整体(并行取)
+    private val metaClient = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .callTimeout(8, TimeUnit.SECONDS)
+        .build()
+
     fun currentVersionCode(ctx: Context): Long = try {
         val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
         if (android.os.Build.VERSION.SDK_INT >= 28) pi.longVersionCode
@@ -71,25 +87,34 @@ object Updater {
         ""
     }
 
-    /** 拉取最新版本元数据;全部镜像失败返回 null */
-    suspend fun fetchLatest(): Info? = withContext(Dispatchers.IO) {
-        for (url in METADATA_URLS) {
-            try {
-                val body = client.newCall(Request.Builder().url(url).build()).execute().use { r ->
-                    if (!r.isSuccessful) null else r.body?.string()
-                }
-                if (body.isNullOrBlank()) continue
-                val o = JSONObject(body)
-                val code = o.optLong("versionCode", 0)
-                val name = o.optString("versionName", "")
-                val apk = o.optString("apkUrl", "")
-                if (code > 0 && name.isNotBlank() && apk.isNotBlank()) {
-                    return@withContext Info(code, name, apk, o.optString("apkHash", ""))
-                }
-            } catch (_: Exception) {
-                // 换下一个镜像
-            }
+    /**
+     * 拉取最新版本元数据:并行查询所有镜像,取 versionCode **最大**者。
+     * 关键修复——jsDelivr 会长时间缓存 @main 的 latest.json,旧的"取第一个有效源"
+     * 逻辑会被过期缓存带偏(明明有新版本却报"已是最新")。改为各源取最大,任一镜像
+     * 刷新后即可发现新版;再附 5 分钟时间桶的 `?z=` 参数绕开 CDN 缓存。全部失败返回 null。
+     */
+    suspend fun fetchLatest(): Info? = coroutineScope {
+        val z = System.currentTimeMillis() / 300_000   // 5 分钟一个桶
+        METADATA_URLS.map { url ->
+            async(Dispatchers.IO) { fetchLatestOne("$url?z=$z") }
+        }.awaitAll().filterNotNull().maxByOrNull { it.versionCode }
+    }
+
+    private fun fetchLatestOne(url: String): Info? = try {
+        val body = metaClient.newCall(Request.Builder().url(url).build()).execute().use { r ->
+            if (!r.isSuccessful) null else r.body?.string()
         }
+        if (body.isNullOrBlank()) null
+        else {
+            val o = JSONObject(body)
+            val code = o.optLong("versionCode", 0)
+            val name = o.optString("versionName", "")
+            val apk = o.optString("apkUrl", "")
+            if (code > 0 && name.isNotBlank() && apk.isNotBlank())
+                Info(code, name, apk, o.optString("apkHash", ""), o.optString("notes", ""))
+            else null
+        }
+    } catch (_: Exception) {
         null
     }
 

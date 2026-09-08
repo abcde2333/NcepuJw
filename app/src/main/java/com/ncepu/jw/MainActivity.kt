@@ -27,6 +27,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
@@ -351,10 +354,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 val remote = try { ilife.devices(waterToken) } catch (_: Exception) { emptyList() }
                 // 合并手动添加的设备(不覆盖远程)
                 val manual = settings.waterDevices.filter { m -> remote.none { it.first == m.first } }
-                val all = (remote + manual).ifEmpty {
-                    // 远程失败且无手动设备时仍显示手动设备
-                    manual
-                }
+                // 长按排序后的自定义顺序应用;新出现的 did 追加在后
+                val all = settings.applyWaterOrder((remote + manual).distinctBy { it.first }) { it.first }
                 // 逐台查真实状态:非99=出水中(顺带记录已出水量,支持"接水中"恢复)
                 val merged = all.map { (did, name) ->
                     val st = try { ilife.deviceStatus(waterToken, did) } catch (_: Exception) { null }
@@ -363,6 +364,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                         if (!waterStartAt.containsKey(did)) waterStartAt[did] = System.currentTimeMillis()
                     }
                     Triple(did, name, st?.drinking ?: (waterState.devices.firstOrNull { it.first == did }?.third ?: false))
+                }
+                // 锁定当前显示顺序(含新设备),供下次稳定排序
+                if (merged.isNotEmpty() && settings.waterOrder != merged.map { it.first }) {
+                    settings.waterOrder = merged.map { it.first }
                 }
                 waterState = waterState.copy(
                     devices = merged,
@@ -756,6 +761,15 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     fun startWaterDevice(did: String) = toggleWaterDevice(did, start = true)
 
     fun endWaterDevice(did: String) = toggleWaterDevice(did, start = false)
+
+    /** 拖动排序:把 from 位置的饮水机移到 to 位置(其余相对顺序不变),更新显示并持久化 */
+    fun moveWaterDevice(from: Int, to: Int) {
+        val list = waterState.devices.toMutableList()
+        if (from < 0 || from >= list.size || to < 0 || to >= list.size || from == to) return
+        list.add(to, list.removeAt(from))
+        waterState = waterState.copy(devices = list)
+        settings.waterOrder = list.map { it.first }
+    }
 
     private fun setWaterRunning(did: String, running: Boolean) {
         waterState = waterState.copy(
@@ -1738,11 +1752,24 @@ class MainActivity : ComponentActivity() {
                 onDismissRequest = { vm.snoozeUpdate() },
                 title = { Text("发现新版本 v${state.info.versionName}") },
                 text = {
-                    Text(
-                        "当前版本 v${com.ncepu.jw.update.Updater.currentVersionName(
-                            androidx.compose.ui.platform.LocalContext.current
-                        )}。\n修复与改进见更新说明,建议升级。"
-                    )
+                    Column(Modifier.heightIn(max = 400.dp)) {
+                        Text(
+                            "当前版本 v${com.ncepu.jw.update.Updater.currentVersionName(
+                                androidx.compose.ui.platform.LocalContext.current
+                            )},建议升级到 v${state.info.versionName}。"
+                        )
+                        val notes = state.info.notes.trim()
+                        if (notes.isNotBlank()) {
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                notes,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .verticalScroll(rememberScrollState()),
+                            )
+                        }
+                    }
                 },
                 confirmButton = { Button(onClick = { vm.downloadUpdate() }) { Text("立即更新") } },
                 dismissButton = { TextButton(onClick = { vm.snoozeUpdate() }) { Text("以后再说") } },
@@ -1969,6 +1996,7 @@ class MainActivity : ComponentActivity() {
                                 onEndDevice = { vm.endWaterDevice(it) },
                                 onAddDevice = { did, name -> vm.addWaterDevice(did, name) },
                                 onRemoveDevice = { did -> vm.removeWaterDevice(did) },
+                                onReorder = { from, to -> vm.moveWaterDevice(from, to) },
                                 onScan = onOpenWaterScan,
                                 scanResult = vm.waterScanResult,
                             )

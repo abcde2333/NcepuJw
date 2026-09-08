@@ -1,5 +1,11 @@
 package com.ncepu.jw.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -258,75 +264,83 @@ fun WasherScreen(
                             }
                         }
                     }
-                    // 2. 洗涤模式(接口按设备返回,不同机器模式/价格不同)
-                    if (state.models.isNotEmpty()) {
-                        item {
-                            OrderSection(title = "2. 洗涤模式", tail = "请选择洗涤模式") {
-                                state.models.chunked(4).forEach { rowModels ->
-                                    Row(
-                                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    ) {
-                                        rowModels.forEach { m ->
-                                            OptionChip(
-                                                title = m.name,
-                                                subtitle = m.priceText,
-                                                selected = state.selectedModelId == m.id,
-                                                modifier = Modifier.weight(1f),
-                                                onClick = { onSelectModel(m.id) },
-                                            )
+                    // 2~4. 设备相关配置:切换不同洗衣机时,整块做淡入+水平滑动过渡
+                    item(key = "dev-config") {
+                        AnimatedContent(
+                            targetState = state.scannedDevice ?: "",
+                            label = "washer-device-switch",
+                            transitionSpec = {
+                                (slideInHorizontally(tween(260)) { full -> full / 6 } + fadeIn(tween(260)))
+                                    .togetherWith(fadeOut(tween(120)))
+                            },
+                        ) {
+                            Column {
+                                // 2. 洗涤模式(接口按设备返回,不同机器模式/价格不同)
+                                if (state.models.isNotEmpty()) {
+                                    OrderSection(title = "2. 洗涤模式", tail = "请选择洗涤模式") {
+                                        state.models.chunked(4).forEach { rowModels ->
+                                            Row(
+                                                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            ) {
+                                                rowModels.forEach { m ->
+                                                    OptionChip(
+                                                        title = m.name,
+                                                        subtitle = m.priceText,
+                                                        selected = state.selectedModelId == m.id,
+                                                        modifier = Modifier.weight(1f),
+                                                        onClick = { onSelectModel(m.id) },
+                                                    )
+                                                }
+                                                repeat(4 - rowModels.size) { Spacer(Modifier.weight(1f)) }
+                                            }
                                         }
-                                        repeat(4 - rowModels.size) { Spacer(Modifier.weight(1f)) }
                                     }
                                 }
-                            }
-                        }
-                    }
-                    // 3. 选项组:洗衣液/除菌液/温度/筒自洁…,均由接口 additionDevices/additionParams 动态返回。
-                    //    加热机器的模型才带 washTemperatureId 组 → 温度选择只在其上出现;加购型额外给"不添加"。
-                    selectedModel?.additions?.forEach { group ->
-                        item(key = group.key) {
-                            OrderSection(title = group.name, tail = if (group.purchasable) "可选加购" else "请选择") {
-                                val options: List<Pair<Int?, Pair<String, Int>>> = buildList {
-                                    if (group.purchasable) add(null to ("不添加" to 0))
-                                    group.options.forEach { add(it.id to (it.name to it.priceFen)) }
-                                }
-                                options.chunked(3).forEach { rowOpts ->
-                                    Row(
-                                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    ) {
-                                        rowOpts.forEach { (optId, ui) ->
-                                            OptionChip(
-                                                title = ui.first,
-                                                subtitle = if (ui.second > 0) "+¥${UjingClient.fen2yuan(ui.second)}" else null,
-                                                selected = state.selectedAdditions[group.key] == optId,
-                                                modifier = Modifier.weight(1f),
-                                                onClick = { onSelectAddition(group.key, optId) },
-                                            )
+                                // 3. 选项组:洗衣液/除菌液/温度/筒自洁…,均由接口 additionDevices/additionParams 动态返回。
+                                //    加热机器的模型才带 washTemperatureId 组 → 温度选择只在其上出现;加购型额外给"不添加"。
+                                selectedModel?.additions?.forEach { group ->
+                                    OrderSection(title = group.name, tail = if (group.purchasable) "可选加购" else "请选择") {
+                                        val options: List<Pair<Int?, Pair<String, Int>>> = buildList {
+                                            if (group.purchasable) add(null to ("不添加" to 0))
+                                            group.options.forEach { add(it.id to (it.name to it.priceFen)) }
                                         }
-                                        repeat(3 - rowOpts.size) { Spacer(Modifier.weight(1f)) }
+                                        options.chunked(3).forEach { rowOpts ->
+                                            Row(
+                                                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            ) {
+                                                rowOpts.forEach { (optId, ui) ->
+                                                    OptionChip(
+                                                        title = ui.first,
+                                                        subtitle = if (ui.second > 0) "+¥${UjingClient.fen2yuan(ui.second)}" else null,
+                                                        selected = state.selectedAdditions[group.key] == optId,
+                                                        modifier = Modifier.weight(1f),
+                                                        onClick = { onSelectAddition(group.key, optId) },
+                                                    )
+                                                }
+                                                repeat(3 - rowOpts.size) { Spacer(Modifier.weight(1f)) }
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
-                    }
-                    // 4. 下单(预估价 = 模式 + 各选项组所选档位加价)
-                    if (selectedModel != null) {
-                        item {
-                            val addFen = selectedModel.additions.sumOf { g ->
-                                g.options.firstOrNull { it.id == state.selectedAdditions[g.key] }?.priceFen ?: 0
-                            }
-                            val estimate = selectedModel.priceFen + addFen
-                            Button(
-                                onClick = onCreateOrder,
-                                enabled = !state.loading,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                                    .height(48.dp),
-                            ) {
-                                Text("创建订单 · 预估 ¥${UjingClient.fen2yuan(estimate)}")
+                                // 4. 下单(预估价 = 模式 + 各选项组所选档位加价)
+                                if (selectedModel != null) {
+                                    val addFen = selectedModel.additions.sumOf { g ->
+                                        g.options.firstOrNull { it.id == state.selectedAdditions[g.key] }?.priceFen ?: 0
+                                    }
+                                    val estimate = selectedModel.priceFen + addFen
+                                    Button(
+                                        onClick = onCreateOrder,
+                                        enabled = !state.loading,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                                            .height(48.dp),
+                                    ) {
+                                        Text("创建订单 · 预估 ¥${UjingClient.fen2yuan(estimate)}")
+                                    }
+                                }
                             }
                         }
                     }

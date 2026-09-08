@@ -12,8 +12,8 @@ android {
         applicationId = "com.ncepu.jw"
         minSdk = 26
         targetSdk = 35
-        versionCode = 48
-        versionName = "4.17"
+        versionCode = 49
+        versionName = "4.18"
     }
 
     signingConfigs {
@@ -75,6 +75,7 @@ dependencies {
     // Kyant0/AndroidLiquidGlass(Compose 多平台 backdrop):液态玻璃悬浮底栏
     implementation("io.github.kyant0:backdrop:2.0.1")
     implementation("io.github.kyant0:shapes:1.2.1")
+    implementation("sh.calvin.reorderable:reorderable:2.5.1")   // 饮水机长按拖动排序(按 Compose 1.7 编译)
     implementation("com.google.mlkit:barcode-scanning:17.2.0")
     implementation("net.sourceforge.jexcelapi:jxl:2.6.12")
     implementation("androidx.camera:camera-camera2:1.3.4")

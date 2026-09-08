@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,13 +16,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -44,6 +48,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.zIndex
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
@@ -64,7 +72,7 @@ data class WaterUiState(
 )
 
 /** 饮水机页:短信登录 → 设备列表 → 一键开关水(onBack=null 时为底栏内嵌,无返回键) */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun WaterScreen(
     state: WaterUiState,
@@ -83,6 +91,7 @@ fun WaterScreen(
     onEndDevice: (String) -> Unit,
     onAddDevice: (String, String) -> Unit,
     onRemoveDevice: (String) -> Unit,
+    onReorder: (Int, Int) -> Unit = { _, _ -> },
     onScan: () -> Unit,
     scanResult: String? = null,
     onBack: (() -> Unit)? = null,
@@ -230,6 +239,14 @@ fun WaterScreen(
                         Text("刷新")
                     }
                 }
+                if (state.devices.size > 1) {
+                    Text(
+                        "长按卡片即可拖动调整顺序",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                }
                 state.message?.let {
                     Text(
                         it,
@@ -252,61 +269,84 @@ fun WaterScreen(
                         )
                     }
                 } else {
-                    LazyColumn(Modifier.fillMaxSize()) {
-                        items(state.devices, key = { it.first }) { (did, name, running) ->
-                            Card(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 4.dp)
-                                    .clickable { } ,
-                            ) {
-                                Row(
-                                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
+                    val lazyListState = rememberLazyListState()
+                    val reorderState = rememberReorderableLazyListState(lazyListState) { from, to ->
+                        onReorder(from.index, to.index)
+                    }
+                    LazyColumn(state = lazyListState, modifier = Modifier.fillMaxSize()) {
+                        itemsIndexed(state.devices, key = { _, d -> d.first }) { _, (did, name, running) ->
+                            ReorderableItem(reorderState, key = did) { isDragging ->
+                                Box(
+                                    Modifier
+                                        .zIndex(if (isDragging) 1f else 0f)
+                                        .graphicsLayer {
+                                            if (isDragging) { scaleX = 1.03f; scaleY = 1.03f }
+                                        }
+                                        .longPressDraggableHandle(),
                                 ) {
-                                    Icon(
-                                        Icons.Filled.WaterDrop,
-                                        contentDescription = null,
-                                        tint = if (running) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.outline,
-                                    )
-                                    Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                                    Card(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                                        elevation = CardDefaults.cardElevation(
+                                            defaultElevation = if (isDragging) 8.dp else 0.dp,
+                                        ),
+                                    ) {
+                                        Row(
+                                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.DragHandle,
+                                                contentDescription = "长按拖动排序",
+                                                tint = MaterialTheme.colorScheme.outline,
+                                                modifier = Modifier.padding(end = 8.dp),
+                                            )
+                                            Icon(
+                                                Icons.Filled.WaterDrop,
+                                                contentDescription = null,
+                                                tint = if (running) MaterialTheme.colorScheme.primary
+                                                else MaterialTheme.colorScheme.outline,
+                                            )
+                                            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                                                Text(
+                                                    name.ifBlank { "饮水设备" },
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    fontWeight = FontWeight.Medium,
+                                                )
+                                                Text(
+                                                    "编号 $did",
+                                                    fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.outline,
+                                                )
+                                            }
+                                            Text(
+                                                if (running) "结束出水" else "出水",
+                                                color = MaterialTheme.colorScheme.primary,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(
+                                                        if (running) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                                        else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                                                    )
+                                                    .clickable {
+                                                        if (running) onEndDevice(did) else onStartDevice(did)
+                                                    }
+                                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                            )
+                                        }
                                         Text(
-                                            name.ifBlank { "饮水设备" },
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            fontWeight = FontWeight.Medium,
-                                        )
-                                        Text(
-                                            "编号 $did",
+                                            "移除",
                                             fontSize = 11.sp,
-                                            color = MaterialTheme.colorScheme.outline,
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier
+                                                .align(Alignment.End)
+                                                .clickable { onRemoveDevice(did) }
+                                                .padding(horizontal = 16.dp, vertical = 2.dp),
                                         )
                                     }
-                                    Text(
-                                        if (running) "结束出水" else "出水",
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(
-                                                if (running) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
-                                                else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
-                                            )
-                                            .clickable {
-                                                if (running) onEndDevice(did) else onStartDevice(did)
-                                            }
-                                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                                    )
                                 }
-                                Text(
-                                    "移除",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier
-                                        .align(Alignment.End)
-                                        .clickable { onRemoveDevice(did) }
-                                        .padding(horizontal = 16.dp, vertical = 2.dp),
-                                )
                             }
                         }
                     }
