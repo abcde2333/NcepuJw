@@ -28,14 +28,19 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.CompositionLocalProvider
@@ -67,6 +72,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.ncepu.jw.data.Course
+import com.ncepu.jw.data.WasherOrderInfo
+import com.ncepu.jw.update.WasherWatchService
 import com.ncepu.jw.data.Grade
 import com.ncepu.jw.data.JwClient
 import com.ncepu.jw.data.JwException
@@ -151,6 +158,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var updateState by mutableStateOf<com.ncepu.jw.update.Updater.State>(
         com.ncepu.jw.update.Updater.State.Idle
     )
+    var updatePrompt by mutableStateOf(false)   // 更新提醒弹窗开关
+    var updateTargetName by mutableStateOf("") // 目标版本名(下载中展示)
+    private var updatePendingInfo: com.ncepu.jw.update.Updater.Info? = null // 供下载失败重试
     var selectedWeek by mutableStateOf(0)        // 当前查看的周
     var schedLoaded by mutableStateOf(false)
 
@@ -217,6 +227,13 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
         // 启动时自动检查更新(12 小时节流,镜像站加速)
         viewModelScope.launch(Dispatchers.IO) { checkForUpdate(force = false) }
+        // 应用存活期间定时复检(每小时醒一次,实际请求仍受 12 小时节流)
+        viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(60 * 60_000)
+                checkForUpdate(force = false)
+            }
+        }
         // 冷却倒计时(饮水/洗衣机短信共用)
         viewModelScope.launch {
             while (true) {
@@ -338,9 +355,14 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     // 远程失败且无手动设备时仍显示手动设备
                     manual
                 }
+                // 逐台查真实状态:非99=出水中(顺带记录已出水量,支持"接水中"恢复)
                 val merged = all.map { (did, name) ->
-                    val prev = waterState.devices.firstOrNull { it.first == did }
-                    Triple(did, name, prev?.third ?: false)
+                    val st = try { ilife.deviceStatus(waterToken, did) } catch (_: Exception) { null }
+                    if (st != null && st.drinking) {
+                        waterOut[did] = st.out
+                        if (!waterStartAt.containsKey(did)) waterStartAt[did] = System.currentTimeMillis()
+                    }
+                    Triple(did, name, st?.drinking ?: (waterState.devices.firstOrNull { it.first == did }?.third ?: false))
                 }
                 waterState = waterState.copy(
                     devices = merged,
@@ -349,6 +371,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                         accountName?.let { "已登录:$accountName · 暂无设备,可手动添加" } ?: "暂无设备,可手动添加"
                     } else null,
                 )
+                ensureWaterPoller()
             } catch (e: Exception) {
                 waterState = waterState.copy(loading = false, message = "加载失败:${e.message}")
             }
@@ -483,6 +506,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         washerState = washerState.copy(savedWashers = settings.washerDevices)
         val models = UjingClient.Parsers.parseModels(info.json)
         val defaultId = UjingClient.Parsers.defaultModelId(models)
+        val defaultModel = models.firstOrNull { it.id == defaultId }
         washerState = washerState.copy(
             loading = false,
             scannedDevice = deviceId,
@@ -490,21 +514,27 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 (info.json?.optString("deviceTypeName", "") ?: ""),
             models = models,
             selectedModelId = defaultId,
-            selectedAdditions = models.firstOrNull { it.id == defaultId }
-                ?.additions?.associate { it.key to null } ?: emptyMap(),
-            selectedTemperatureId = 1,
+            // 各选项组默认:必选型(温度/自洁)取首项,加购型不添加
+            selectedAdditions = defaultModel?.additions
+                ?.associate { it.key to com.ncepu.jw.data.UjingClient.Parsers.defaultSelection(it) }
+                ?: emptyMap(),
             message = null,
         )
         return null
     }
 
-    /** 活跃订单状态(30 准备中 / 40 运行中)→ 设备忙碌 */
+    /**
+     * 活跃订单状态 → 设备忙碌。含 20 待启动 / 22 自洁启动中 / 30 自洁中 / 35 自洁完成
+     * (5 分钟启动窗口内机器仍被本单占用)/ 40 运行中;10 待支付不算占用。
+     */
     private val activeOrderDevices = mutableSetOf<String>()
+
+    private fun washerBusyStatus(status: String) = status in setOf("20", "22", "30", "35", "40")
 
     fun updateActiveOrder(deviceId: String, status: String) {
         activeOrderDevices.clear()
-        if (status == "30" || status == "40") activeOrderDevices.add(deviceId)
-        settings.updateWasherStatus(deviceId, if (status == "30" || status == "40") "忙碌" else "空闲")
+        if (washerBusyStatus(status)) activeOrderDevices.add(deviceId)
+        settings.updateWasherStatus(deviceId, if (washerBusyStatus(status)) "使用中" else "空闲")
         washerState = washerState.copy(savedWashers = settings.washerDevices)
     }
 
@@ -536,7 +566,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             ?: washerState.models.firstOrNull { it.id == 1 }
             ?: washerState.models.firstOrNull()
             ?: return
-        // 加购:只把"已选档位"(非不添加)放进下单字段(key 即接口返回的 wp_xxx 字段名)
+        // 各选项组已选档位按 key 作为下单字段(washTemperatureId/selfCleanId/wp_detergentGearId 等)
         val extras = model.additions.mapNotNull { g ->
             washerState.selectedAdditions[g.key]?.let { g.key to it }
         }.toMap()
@@ -544,7 +574,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val r = ujing.createOrder(
                 washerToken, deviceId, scanned.first, scanned.second, model.id,
-                temperatureId = washerState.selectedTemperatureId,
+                temperatureId = 1,   // 加热机器由 extras 的 washTemperatureId 覆盖
                 extras = extras,
             )
             if (!r.ok) {
@@ -554,8 +584,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             val orderId = r.json?.optString("orderId", "") ?: ""
             val detail = ujing.orderDetail(washerToken, orderId)
             val order = UjingClient.Parsers.parseOrder(detail.json)
+            val selfCleanOn = (model.additions.firstOrNull { it.key == "selfCleanId" }
+                ?.let { g -> washerState.selectedAdditions[g.key] ?: UjingClient.Parsers.defaultSelection(g) } ?: 0) != 0
             updateActiveOrder(deviceId, order.status)
-            washerState = washerState.copy(loading = false, currentOrder = order)
+            washerState = washerState.copy(loading = false, currentOrder = order, selfCleanOrdered = selfCleanOn)
         }
     }
 
@@ -577,23 +609,83 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             val result = withContext(Dispatchers.IO) {
                 com.alipay.sdk.app.PayTask(activity).payV2(orderInfo, true)
             }
-            val paid = result.contains("resultStatus={9000}")
-            val refreshed = ujing.orderDetail(washerToken, order.orderId)
-            val newOrder = UjingClient.Parsers.parseOrder(refreshed.json)
-            updateActiveOrder(washerState.scannedDevice ?: "", newOrder.status)
+            val sdkPaid = result.contains("resultStatus={9000}")
+            var cur = UjingClient.Parsers.parseOrder(ujing.orderDetail(washerToken, order.orderId).json)
+            // 支付结果补查:SDK 回调可能丢失,轮询订单是否已脱离"待支付(10)"(报告 §3.6)
+            var tries = 0
+            while (cur.status == "10" && tries < 8) {
+                kotlinx.coroutines.delay(1500); tries++
+                val dd = runCatching { ujing.orderDetail(washerToken, order.orderId) }.getOrNull()
+                if (dd?.json != null) cur = UjingClient.Parsers.parseOrder(dd.json)
+                else runCatching { ujing.lastPayStatus(washerToken, order.orderId) }  // 备用探测,触发后端结算落库
+            }
+            val paid = sdkPaid || (cur.status.isNotEmpty() && cur.status != "10")
+            updateActiveOrder(washerState.scannedDevice ?: "", cur.status)
             washerState = washerState.copy(
                 loading = false,
-                currentOrder = newOrder,
-                message = if (paid) {
-                    if (washerState.autoStartAfterPay) "支付成功,3 秒后自动启动洗衣机" else "支付成功"
-                } else "支付未完成,可在订单中重试",
+                currentOrder = cur,
+                message = when {
+                    paid && cur.status != "10" && !sdkPaid -> "支付已确认(补查)"
+                    paid && washerState.autoStartAfterPay -> "支付成功,3 秒后自动启动洗衣机"
+                    paid -> "支付成功"
+                    else -> "支付未完成,可在订单中重试"
+                },
             )
             if (paid && washerState.autoStartAfterPay) {
                 kotlinx.coroutines.delay(3000)
-                ujing.startOrder(washerToken, order.orderId)
+                val sr = ujing.startOrder(washerToken, order.orderId)
+                if (!UjingClient.commandAccepted(sr)) {
+                    washerState = washerState.copy(message = "自动启动失败:" + UjingClient.commandError(sr))
+                }
                 val d2 = ujing.orderDetail(washerToken, order.orderId)
                 washerState = washerState.copy(currentOrder = UjingClient.Parsers.parseOrder(d2.json))
             }
+            if (paid) {
+                ensureWasherPoller()
+                com.ncepu.jw.update.WasherWatchService.start(getApplication(), order.orderId)
+            }
+        }
+    }
+
+    // ---------- 订单状态轮询(前台 UI)+ 后台由 WasherWatchService 通知 ----------
+    private var washerPollJob: kotlinx.coroutines.Job? = null
+
+    private fun isWasherTerminal(o: WasherOrderInfo) =
+        o.status in setOf("50", "60") ||
+            o.statusText.contains("完成") || o.statusText.contains("结束") ||
+            o.statusText.contains("取消") || o.statusText.contains("已结算")
+
+    /**
+     * 前台 UI 刷新用:仅同步订单(通知统一由 WasherWatchService 发,避免前后台重复)。
+     * 订单进入非活动态时停掉监控服务。
+     */
+    private fun applyWasherOrder(o: WasherOrderInfo) {
+        if (o.status in setOf("50", "60")) {
+            WasherWatchService.stop(getApplication())
+        }
+    }
+
+    private suspend fun refreshWasherOrderSilently() {
+        val cur = washerState.currentOrder ?: return
+        val d = runCatching { ujing.orderDetail(washerToken, cur.orderId) }.getOrNull() ?: return
+        val no = UjingClient.Parsers.parseOrder(d.json)
+        applyWasherOrder(no)
+        updateActiveOrder(washerState.scannedDevice ?: "", no.status)
+        washerState = washerState.copy(currentOrder = no)
+    }
+
+    private fun ensureWasherPoller() {
+        val o = washerState.currentOrder ?: return
+        if (isWasherTerminal(o)) return
+        if (washerPollJob?.isActive == true) return
+        washerPollJob = viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(15000)
+                if (washerState.currentOrder == null) break
+                refreshWasherOrderSilently()
+                if (washerState.currentOrder?.let { isWasherTerminal(it) } == true) break
+            }
+            washerPollJob = null
         }
     }
 
@@ -602,14 +694,20 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         washerState = washerState.copy(loading = true)
         viewModelScope.launch {
             val d = ujing.orderDetail(washerToken, order.orderId)
-            washerState = washerState.copy(loading = false, currentOrder = UjingClient.Parsers.parseOrder(d.json))
+            val no = UjingClient.Parsers.parseOrder(d.json)
+            applyWasherOrder(no)
+            washerState = washerState.copy(loading = false, currentOrder = no)
+            ensureWasherPoller()
         }
     }
 
     fun washerStart() {
         val order = washerState.currentOrder ?: return
         viewModelScope.launch {
-            ujing.startOrder(washerToken, order.orderId)
+            val r = ujing.startOrder(washerToken, order.orderId)
+            if (!UjingClient.commandAccepted(r)) {
+                washerState = washerState.copy(message = "启动失败:" + UjingClient.commandError(r))
+            }
             washerRefresh()
         }
     }
@@ -617,54 +715,166 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     fun refreshWasherSaved() {
         // 恢复已保存的登录态(重启后免登录)
         if (washerToken.isBlank()) washerToken = settings.washerToken
+        // 自愈:清掉旧版本残留的门店级"空闲 X/共 Y"等脏状态,只保留 使用中/空闲
+        settings.washerDevices.forEach { w ->
+            if (w.status != "使用中" && w.status != "空闲") settings.updateWasherStatus(w.did, "空闲")
+        }
         washerState = washerState.copy(
             loggedIn = washerToken.isNotBlank(),
             savedWashers = settings.washerDevices,
         )
+        washerResumeRunning()
+    }
+
+    /** 进入洗衣页:拉一次进行中订单,恢复"正在跑"的订单详情/启动按钮(报告 §3.3) */
+    private fun washerResumeRunning() {
+        if (washerToken.isBlank() || washerState.currentOrder != null) return
+        viewModelScope.launch {
+            val full = runCatching { ujing.runningOrders(washerToken) }.getOrNull() ?: return@launch
+            val first = UjingClient.Parsers.firstRunning(full) ?: return@launch
+            val (orderId, deviceId) = first
+            val d = runCatching { ujing.orderDetail(washerToken, orderId) }.getOrNull() ?: return@launch
+            val order = UjingClient.Parsers.parseOrder(d.json)
+            if (order.orderId.isBlank()) return@launch
+            val did = deviceId.ifBlank { washerState.scannedDevice ?: "" }
+            if (did.isNotBlank()) washerState = washerState.copy(scannedDevice = did)
+            washerState = washerState.copy(currentOrder = order, message = "已恢复进行中的订单")
+            if (did.isNotBlank()) updateActiveOrder(did, order.status)
+            ensureWasherPoller()
+            WasherWatchService.start(getApplication(), order.orderId)
+        }
     }
 
     /** 每台设备在途的操作(防连点竞态:迟到的 start 响应不得覆盖之后的 end) */
     private val waterOps = mutableMapOf<String, kotlinx.coroutines.Job>()
+    private val waterLastOpAt = HashMap<String, Long>()
+    private val waterStartAt = HashMap<String, Long>()
+    private val waterOut = HashMap<String, Double>()
+    private val waterIdle = HashMap<String, Int>()
+    private var waterPollJob: kotlinx.coroutines.Job? = null
 
     fun startWaterDevice(did: String) = toggleWaterDevice(did, start = true)
 
     fun endWaterDevice(did: String) = toggleWaterDevice(did, start = false)
 
-    private fun toggleWaterDevice(did: String, start: Boolean) {
-        if (waterOps[did]?.isActive == true) return
-        // 乐观更新:点击立即切换显示,失败再回滚
+    private fun setWaterRunning(did: String, running: Boolean) {
         waterState = waterState.copy(
-            loading = true,
-            message = null,
             devices = waterState.devices.map {
-                if (it.first == did) Triple(it.first, it.second, start) else it
+                if (it.first == did) Triple(it.first, it.second, running) else it
             },
         )
+    }
+
+    /**
+     * 出水/结束:点"出水"→按钮"结束出水"并起真实状态轮询(ui/app/dev/status);
+     * 点"结束"成功或报错(机身已停)→结束并结算通知;轮询发现机身停止也自动结算。
+     */
+    private fun toggleWaterDevice(did: String, start: Boolean) {
+        if (waterOps[did]?.isActive == true) return
+        val now = System.currentTimeMillis()
+        if (now - (waterLastOpAt[did] ?: 0L) < 3000L) return  // 防连点触发频控
+        waterLastOpAt[did] = now
+        setWaterRunning(did, start)
+        waterState = waterState.copy(loading = true, message = null)
         waterOps[did] = viewModelScope.launch {
             try {
-                val r = if (start) ilife.start(waterToken, did) else ilife.end(waterToken, did)
-                val verb = if (start) "启动" else "结束"
-                waterState = waterState.copy(
-                    loading = false,
-                    message = if (r.ok) {
-                        if (start) "设备已启动,请接水" else "已结束出水"
-                    } else "$verb 失败:${IlifeClient.readable(r.code, r.msg)}",
-                    devices = waterState.devices.map {
-                        if (it.first == did) Triple(it.first, it.second, if (r.ok) start else !start) else it
-                    },
-                )
+                if (start) {
+                    val r = ilife.start(waterToken, did)
+                    waterState = waterState.copy(loading = false)
+                    if (r.ok) {
+                        waterStartAt[did] = now; waterOut[did] = 0.0; waterIdle[did] = 0
+                        waterState = waterState.copy(message = "设备已启动,请接水")
+                        ensureWaterPoller()
+                    } else {
+                        setWaterRunning(did, false)
+                        waterState = waterState.copy(message = "启动失败:${IlifeClient.readableDevice(r.code, r.msg)}")
+                    }
+                } else {
+                    val r = ilife.end(waterToken, did)
+                    val st = runCatching { ilife.deviceStatus(waterToken, did) }.getOrNull()
+                    settleWater(did, st?.out ?: waterOut[did] ?: 0.0)
+                    setWaterRunning(did, false); waterIdle[did] = 0
+                    waterState = waterState.copy(
+                        loading = false,
+                        message = if (r.ok) "已结束出水" else "该设备可能已停止出水",
+                    )
+                    ensureWaterPoller()
+                }
             } catch (e: Exception) {
-                waterState = waterState.copy(
-                    loading = false,
-                    message = "${if (start) "启动" else "结束"}异常:${e.message}",
-                    devices = waterState.devices.map {
-                        if (it.first == did) Triple(it.first, it.second, !start) else it
-                    },
-                )
+                waterState = waterState.copy(loading = false)
+                setWaterRunning(did, false)
+                waterState = waterState.copy(message = if (!start) "该设备可能已停止出水" else "启动异常:${e.message}")
             } finally {
                 waterOps.remove(did)
             }
         }
+    }
+
+    /** 出水期间每 1.5s 轮询真实状态;无设备出水即停轮 */
+    private fun ensureWaterPoller() {
+        val anyRunning = waterState.devices.any { it.third }
+        if (!anyRunning) { waterPollJob?.cancel(); waterPollJob = null; return }
+        if (waterPollJob?.isActive == true) return
+        waterPollJob = viewModelScope.launch {
+            while (waterState.devices.any { it.third }) {
+                kotlinx.coroutines.delay(1500)
+                val running = waterState.devices.filter { it.third }.map { it.first }
+                for (did in running) pollWaterDevice(did)
+            }
+            waterPollJob = null
+        }
+    }
+
+    private suspend fun pollWaterDevice(did: String) {
+        val st = try { ilife.deviceStatus(waterToken, did) } catch (_: Exception) { null } ?: return
+        if (st.drinking) {
+            waterIdle[did] = 0; waterOut[did] = st.out
+            if (!waterStartAt.containsKey(did)) waterStartAt[did] = System.currentTimeMillis()
+            setWaterRunning(did, true)
+        } else {
+            val c = (waterIdle[did] ?: 0) + 1; waterIdle[did] = c
+            if (c >= 5) {   // 连续空闲判定结束(设备抖动宽容,参考 Super798App)
+                setWaterRunning(did, false); waterIdle[did] = 0
+                settleWater(did, waterOut[did] ?: 0.0)
+                runCatching { ilife.end(waterToken, did) }  // 补发结算,忽略错误
+            }
+        }
+    }
+
+    /** 结束通知:真实出水量(gene.out)+ 本次用时 */
+    private fun settleWater(did: String, out: Double) {
+        val startMs = waterStartAt.remove(did) ?: 0L
+        val dur = if (startMs > 0) System.currentTimeMillis() - startMs else 0L
+        waterOut.remove(did)
+        val name = waterState.devices.firstOrNull { it.first == did }?.second?.ifBlank { "饮水机" } ?: "饮水机"
+        val mins = dur / 60000; val secs = (dur / 1000) % 60
+        val text = buildString {
+            append("接水结束")
+            if (out > 0) append(" · 约 ${String.format(java.util.Locale.US, "%.2f", out)} 升")
+            if (dur > 0) append(" · 用时 ${mins}分${secs}秒")
+        }
+        postWaterNotification(name, text)
+    }
+
+    private fun postWaterNotification(title: String, text: String) {
+        val ctx = getApplication<android.app.Application>()
+        val nm = ctx.getSystemService(android.app.NotificationManager::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            val ch = android.app.NotificationChannel("water_notice", "饮水提醒", android.app.NotificationManager.IMPORTANCE_DEFAULT)
+            nm?.createNotificationChannel(ch)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) return
+        val n = androidx.core.app.NotificationCompat.Builder(ctx, "water_notice")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .build()
+        nm?.notify((System.currentTimeMillis() and 0x7FFFFFFF).toInt(), n)
     }
 
     fun tryAutoLogin() {
@@ -833,18 +1043,24 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 updateState = com.ncepu.jw.update.Updater.State.Failed("检查失败,请检查网络")
                 return@launch
             }
-            updateState =
-                if (info.versionCode > com.ncepu.jw.update.Updater.currentVersionCode(getApplication())) {
-                    com.ncepu.jw.update.Updater.State.Available(info)
-                } else {
-                    com.ncepu.jw.update.Updater.State.Latest(info.versionName)
-                }
+            if (info.versionCode > com.ncepu.jw.update.Updater.currentVersionCode(getApplication())) {
+                updateState = com.ncepu.jw.update.Updater.State.Available(info)
+                updateTargetName = info.versionName
+                updatePendingInfo = info
+                if (force || info.versionCode > settings.updateSnoozeCode) updatePrompt = true
+            } else {
+                updateState = com.ncepu.jw.update.Updater.State.Latest(info.versionName)
+            }
         }
     }
 
     fun downloadUpdate() {
-        val info = (updateState as? com.ncepu.jw.update.Updater.State.Available)?.info ?: return
+        val info = (updateState as? com.ncepu.jw.update.Updater.State.Available)?.info
+            ?: updatePendingInfo ?: return
         if (updateState is com.ncepu.jw.update.Updater.State.Downloading) return
+        updateTargetName = (updateState as? com.ncepu.jw.update.Updater.State.Available)?.info?.versionName
+            ?: updateTargetName
+        updatePrompt = true
         updateState = com.ncepu.jw.update.Updater.State.Downloading(0)
         viewModelScope.launch {
             try {
@@ -858,11 +1074,21 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
+    /** "以后再说":该版本不再弹窗,出现更高版本时重新提醒 */
+    fun snoozeUpdate() {
+        (updateState as? com.ncepu.jw.update.Updater.State.Available)?.let {
+            settings.updateSnoozeCode = it.info.versionCode
+        }
+        updatePrompt = false
+    }
+
     fun onUpdateAction() {
         when (val s = updateState) {
             is com.ncepu.jw.update.Updater.State.Available -> downloadUpdate()
             is com.ncepu.jw.update.Updater.State.Downloaded -> com.ncepu.jw.update.Updater.install(getApplication(), s.file)
-            is com.ncepu.jw.update.Updater.State.Failed, is com.ncepu.jw.update.Updater.State.Idle -> checkForUpdate(force = true)
+            is com.ncepu.jw.update.Updater.State.Failed ->
+                if (updatePendingInfo != null) downloadUpdate() else checkForUpdate(force = true)
+            is com.ncepu.jw.update.Updater.State.Idle -> checkForUpdate(force = true)
             else -> {}
         }
     }
@@ -1041,6 +1267,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     fun logout() {
         loggedIn = false
         account = ""; password = ""
+        name = null   // 否则退登后头部仍显示旧姓名,与"未登录"矛盾
         courses = emptyList(); grades = emptyList()
         xkRounds = emptyList(); selectedCourses = emptyList(); selectionLoaded = false; selCacheTime = 0
         allCourses = emptyList(); schedLoaded = false
@@ -1303,13 +1530,12 @@ class MainActivity : ComponentActivity() {
                                 val models = vm.washerState.models
                                 vm.washerState = vm.washerState.copy(
                                     selectedModelId = id,
-                                    // 加购组跟随模式切换,重置为"不添加"
+                                    // 切换模式重置各选项组:必选型取默认档,加购型不添加
                                     selectedAdditions = models.firstOrNull { it.id == id }
-                                        ?.additions?.associate { it.key to null } ?: emptyMap(),
+                                        ?.additions?.associate {
+                                            it.key to com.ncepu.jw.data.UjingClient.Parsers.defaultSelection(it)
+                                        } ?: emptyMap(),
                                 )
-                            },
-                            onSelectTemperature = { id ->
-                                vm.washerState = vm.washerState.copy(selectedTemperatureId = id)
                             },
                             onSelectAddition = { key, optId ->
                                 vm.washerState = vm.washerState.copy(
@@ -1492,6 +1718,68 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+        UpdateDialog(vm)
+    }
+
+    /** 更新提醒弹窗:按状态呈现 发现新版/下载进度/可安装/失败;关闭=按版本免打扰 */
+    @Composable
+    private fun UpdateDialog(vm: AppViewModel) {
+        val state = vm.updateState
+        val actionable = state is com.ncepu.jw.update.Updater.State.Available ||
+            state is com.ncepu.jw.update.Updater.State.Downloading ||
+            state is com.ncepu.jw.update.Updater.State.Downloaded ||
+            state is com.ncepu.jw.update.Updater.State.Failed
+        androidx.compose.runtime.LaunchedEffect(state) {
+            if (!actionable) vm.updatePrompt = false
+        }
+        if (!vm.updatePrompt || !actionable) return
+        when (state) {
+            is com.ncepu.jw.update.Updater.State.Available -> AlertDialog(
+                onDismissRequest = { vm.snoozeUpdate() },
+                title = { Text("发现新版本 v${state.info.versionName}") },
+                text = {
+                    Text(
+                        "当前版本 v${com.ncepu.jw.update.Updater.currentVersionName(
+                            androidx.compose.ui.platform.LocalContext.current
+                        )}。\n修复与改进见更新说明,建议升级。"
+                    )
+                },
+                confirmButton = { Button(onClick = { vm.downloadUpdate() }) { Text("立即更新") } },
+                dismissButton = { TextButton(onClick = { vm.snoozeUpdate() }) { Text("以后再说") } },
+            )
+            is com.ncepu.jw.update.Updater.State.Downloading -> AlertDialog(
+                onDismissRequest = { vm.updatePrompt = false },
+                title = { Text("正在下载 v${vm.updateTargetName}") },
+                text = {
+                    Column {
+                        LinearProgressIndicator(
+                            progress = { state.progress / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Text("已完成 ${state.progress}%(镜像加速,失败自动换源)",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = { vm.updatePrompt = false }) { Text("后台继续") } },
+            )
+            is com.ncepu.jw.update.Updater.State.Downloaded -> AlertDialog(
+                onDismissRequest = { vm.snoozeUpdate() },
+                title = { Text("下载完成") },
+                text = { Text("v${state.versionName} 已下载并通过校验,点击安装完成更新。") },
+                confirmButton = { Button(onClick = { vm.onUpdateAction() }) { Text("立即安装") } },
+                dismissButton = { TextButton(onClick = { vm.snoozeUpdate() }) { Text("稍后") } },
+            )
+            is com.ncepu.jw.update.Updater.State.Failed -> AlertDialog(
+                onDismissRequest = { vm.snoozeUpdate() },
+                title = { Text("更新未完成") },
+                text = { Text(state.message ?: "未知错误") },
+                confirmButton = { Button(onClick = { vm.onUpdateAction() }) { Text("重试") } },
+                dismissButton = { TextButton(onClick = { vm.snoozeUpdate() }) { Text("关闭") } },
+            )
+            else -> {}
+        }
     }
 
     private fun isExactAlarmGranted(ctx: Context): Boolean {

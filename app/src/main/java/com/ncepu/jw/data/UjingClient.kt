@@ -44,31 +44,44 @@ class UjingClient {
             else -> msg.ifBlank { "错误 code=$code" }
         }
 
-        /** 订单状态 → 中文(常见值) */
+        /** 订单状态 → 中文(依据 orderDetail.js 的 ORDER_STATUSTEXT) */
         fun statusText(status: String): String = when (status) {
             "0" -> "已创建"
             "10" -> "待支付"
             "20" -> "已支付,待启动"
-            "30" -> "准备中"
-            "40" -> "运行中"
-            "50" -> "已完成"
+            "21" -> "启动中"
+            "22" -> "自洁启动中"
+            "24" -> "正在投放洗衣液"
+            "30" -> "自洁中"
+            "35" -> "自洁完成"
+            "40" -> "运行中(洗涤)"
+            "50" -> "订单完成"
             "60" -> "已取消"
             else -> "状态 $status"
         }
 
-        /** 水温档:官方协议固定 4 档(id, 名称, 加价分)——接口按 washTemperatureId 计费,不随机型变化 */
-        val TEMPERATURES = listOf(
-            Triple(1, "常温", 0),
-            Triple(2, "30°C", 100),
-            Triple(3, "40°C", 150),
-            Triple(4, "60°C", 200),
-        )
+        /** 「启动洗衣」按钮可点的状态:待启动20 / 自洁启动中22 / 自洁完成35(报告:仅这三个) */
+        fun canStartWash(status: String): Boolean = status in setOf("20", "22", "35")
 
         /** 分 → "1.50" */
         fun fen2yuan(fen: Int): String {
             val neg = fen < 0
             val a = kotlin.math.abs(fen)
             return (if (neg) "-" else "") + (a / 100) + "." + ((a % 100) / 10) + (a % 10)
+        }
+
+        /**
+         * 控制指令"受理"判定:成功可能是 code==0,也可能是设备控制专用的 code==1703
+         * 且内层 data.errorCode==0(指令下发成功,不代表运行结果)。报告 §2.3/§3.4。
+         * 注:r.json 已是 data 层(send() 剥壳,1703 也透传)。
+         */
+        fun commandAccepted(r: Result): Boolean =
+            r.code == 0 || (r.code == 1703 && r.json?.optInt("errorCode", -1) == 0)
+
+        /** 1703 时取内层 errorMessage 作为可读原因 */
+        fun commandError(r: Result): String {
+            val em = r.json?.optString("errorMessage", "")?.trim().orEmpty()
+            return em.ifBlank { if (r.msg.isNotBlank()) r.msg else "指令失败(code=${r.code})" }
         }
     }
 
@@ -130,9 +143,9 @@ class UjingClient {
             if (json == null) return@use Result(-999, "HTTP ${resp.code}", null)
             val code = json.optInt("code", -999)
             val msg = json.optString("message", json.optString("msg", ""))
-            // 对齐 FlandreSY transport:成功时剥壳,只把 data 层交给调用方
+            // 对齐 FlandreSY transport:成功(含设备控制受理码 1703)时剥壳,把 data 层交给调用方
             val data = json.optJSONObject("data")
-            Result(code, msg, if (code == 0) data else null)
+            Result(code, msg, if (code == 0 || code == 1703) data else null)
         }
     }
 
@@ -227,17 +240,55 @@ class UjingClient {
         )
     }
 
-    /** 启动洗衣机:GET orders/{id}/control/start */
-    suspend fun startOrder(token: String, orderId: String): Result = withContext(Dispatchers.IO) {
-        send("GET", "orders/$orderId/control/start", appCode = "BA", token = token)
+    /**
+     * 云端设备控制:GET orders/{id}/control/{action}
+     * action: start/stop/continue/restart/selfClean(报告 §3.4)。
+     */
+    suspend fun control(token: String, orderId: String, action: String): Result = withContext(Dispatchers.IO) {
+        send("GET", "orders/$orderId/control/$action", appCode = "BA", token = token)
     }
 
-    /** 停止:GET orders/{id}/control/stop */
-    suspend fun stopOrder(token: String, orderId: String): Result = withContext(Dispatchers.IO) {
-        send("GET", "orders/$orderId/control/stop", appCode = "BA", token = token)
+    /** 启动洗衣机 */
+    suspend fun startOrder(token: String, orderId: String): Result = control(token, orderId, "start")
+
+    /** 暂停 */
+    suspend fun stopOrder(token: String, orderId: String): Result = control(token, orderId, "stop")
+
+    /** 进行中订单列表(报告 §3.3):data 可能为数组或 {list/rows},故返回原始 JSON */
+    suspend fun runningOrders(token: String): org.json.JSONObject? = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder().url(BASE + "orders/running")
+                .header("x-mobile-brand", BRAND).header("x-mobile-id", "")
+                .header("x-app-code", "BA").header("x-app-version", APP_VERSION)
+                .header("x-mobile-model", MODEL).header("accept-encoding", "identity")
+                .header("User-Agent", UA).header("weex-version", WEEX)
+                .header("Authorization", "Bearer $token").build()
+            client.newCall(req).execute().use { org.json.JSONObject(it.body?.string().orEmpty()) }
+        }.getOrNull()
+    }
+
+    /** 最近一次支付状态(静默轮询) */
+    suspend fun lastPayStatus(token: String, orderId: String): Result = withContext(Dispatchers.IO) {
+        send("GET", "app/payment/$orderId/lastPayStatus", appCode = "BA", token = token)
     }
 
     object Parsers {
+        /** 从 running 原始响应取第一个进行中订单 orderId + deviceId(结构未验证,多路兜底) */
+        fun firstRunning(full: org.json.JSONObject?): Pair<String, String>? {
+            val data = full?.opt("data")
+            val arr = when (data) {
+                is org.json.JSONArray -> data
+                is JSONObject -> data.optJSONArray("list") ?: data.optJSONArray("rows")
+                    ?: data.optJSONArray("records") ?: data.optJSONArray("orders")
+                else -> null
+            } ?: return null
+            val o = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.firstOrNull {
+                it.optString("status", "") !in setOf("50", "60")
+            } ?: return null
+            val id = o.optString("orderId").ifBlank { o.optString("id") }
+            return if (id.isBlank()) null else id to o.optString("deviceId", "")
+        }
+
         /**
          * 从套餐 info(data 层)提取洗涤模式(含各模式可用的加购组)。
          * 字段:deviceWashModel[] → workModelId / workModelName / basePrice(分) / time(分钟)
@@ -258,7 +309,7 @@ class UjingClient {
                     name = name,
                     priceFen = o.optInt("basePrice", 0),
                     timeMinutes = o.optInt("time", 0),
-                    additions = parseAdditions(o),
+                    additions = parseAdditions(o) + parseAdditionParams(o),
                 )
             }
             return out
@@ -289,11 +340,44 @@ class UjingClient {
                     }
                 }
                 if (opts.isNotEmpty()) {
-                    groups += WasherAdditionGroup(key, g.optString("name", key), opts)
+                    groups += WasherAdditionGroup(key, g.optString("name", key), opts, purchasable = true)
                 }
             }
             return groups
         }
+
+        /**
+         * additionParams:必选型选项组(温度 washTemperatureId / 筒自洁 selfCleanId …)。
+         * 只有支持加热的机器模型才会带 washTemperatureId 组 → 温度选择自然只在其上出现。
+         */
+        private fun parseAdditionParams(modelJson: JSONObject): List<WasherAdditionGroup> {
+            val arr = modelJson.optJSONArray("additionParams") ?: return emptyList()
+            val groups = mutableListOf<WasherAdditionGroup>()
+            for (i in 0 until arr.length()) {
+                val g = arr.optJSONObject(i) ?: continue
+                val key = g.optString("key", "").trim()
+                if (key.isBlank()) continue
+                val opts = mutableListOf<WasherAdditionOption>()
+                g.optJSONArray("options")?.let { oa ->
+                    for (j in 0 until oa.length()) {
+                        val oo = oa.optJSONObject(j) ?: continue
+                        val oid = oo.optInt("id", -1)
+                        val oname = oo.optString("name", "")
+                        if (oid >= 0 && oname.isNotBlank()) {
+                            opts += WasherAdditionOption(oid, oname, oo.optInt("price", 0))
+                        }
+                    }
+                }
+                if (opts.isEmpty()) continue
+                val name = g.optString("title").ifBlank { g.optString("name", key) }
+                groups += WasherAdditionGroup(key, name, opts, purchasable = false)
+            }
+            return groups
+        }
+
+        /** 组默认选中:必选型取首项(温度=常温、筒自洁=不使用),加购型 null(不添加) */
+        fun defaultSelection(group: WasherAdditionGroup): Int? =
+            if (group.purchasable) null else group.options.firstOrNull()?.id
 
         /** 默认套餐:优先 workModelId=1,否则第一个(对齐 legacy defaultWashModelId) */
         fun defaultModelId(models: List<WasherModel>): Int {
@@ -324,6 +408,10 @@ class UjingClient {
                 statusText = detail.str("statusRemark").ifBlank { statusText(detail.str("status")) },
                 payPrice = payText,
                 remainTimeSeconds = detail.optInt("remainTime", 0),
+                deviceId = detail.str("deviceId"),
+                cleanSelfEndTime = detail.optLong("cleanSelfEndTime", 0L),
+                selfCleanEnable = detail.optBoolean("selfCleanEnable", false) ||
+                    detail.optString("selfCleanEnable", "") == "true",
             )
         }
     }
@@ -334,10 +422,15 @@ private fun JSONObject.str(key: String): String = optString(key, "").trim()
 /** 加购项的一个档位(标准量/大量等);价格单位分 */
 data class WasherAdditionOption(val id: Int, val name: String, val priceFen: Int)
 
-/** 一组加购(洗衣液/除菌液…);key 即下单字段名(wp_detergentGearId 等) */
-data class WasherAdditionGroup(val key: String, val name: String, val options: List<WasherAdditionOption>)
+/** 加购/选项组;key 即下单字段名。purchasable=true 加购型(带"不添加");false 必选型(默认选首项) */
+data class WasherAdditionGroup(
+    val key: String,
+    val name: String,
+    val options: List<WasherAdditionOption>,
+    val purchasable: Boolean = true,
+)
 
-/** 一个洗涤模式(basePrice/time 单位分/分钟),additions 为该模式可用的加购组 */
+/** 一个洗涤模式(basePrice/time 单位分/分钟),additions 为该模式的选项组(含温度/自洁/加购) */
 data class WasherModel(
     val id: Int,
     val name: String,
@@ -357,4 +450,7 @@ data class WasherOrderInfo(
     val statusText: String,
     val payPrice: String,
     val remainTimeSeconds: Int,
+    val deviceId: String = "",
+    val cleanSelfEndTime: Long = 0L,   // 自洁结束时间戳(后端算好下发;非空即已自洁完成)
+    val selfCleanEnable: Boolean = false,
 )

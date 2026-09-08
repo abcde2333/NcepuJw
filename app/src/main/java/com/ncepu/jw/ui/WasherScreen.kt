@@ -62,16 +62,17 @@ data class WasherUiState(
     val deviceSummary: String = "",          // 设备名/门店摘要
     val models: List<WasherModel> = emptyList(),          // 洗涤模式(含各模式加购组)
     val selectedModelId: Int? = null,        // 当前选中的洗涤模式
-    val selectedTemperatureId: Int = 1,      // 水温档(1 常温 / 2 30°C / 3 40°C / 4 60°C)
-    val selectedAdditions: Map<String, Int?> = emptyMap(), // 加购组 key → 档位 id(null=不添加)
+    // 选项组(温度/筒自洁/洗衣液/除菌液)选中:key → 档位 id(null=不添加/未选)
+    val selectedAdditions: Map<String, Int?> = emptyMap(),
     val autoStartAfterPay: Boolean = false,               // 支付成功后自动启动洗衣机
+    val selfCleanOrdered: Boolean = false,                // 本单是否含筒自洁(自洁完成后需再启动)
     val currentOrder: WasherOrderInfo? = null,
     val payUrl: String = "",
     val savedWashers: List<com.ncepu.jw.data.SavedWasher> = emptyList(),
 )
 
 /** 洗衣页:登录 → 扫码/输设备号 → 模式/温度/加购下单 → 支付 → 启动/状态 */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun WasherScreen(
     state: WasherUiState,
@@ -85,7 +86,6 @@ fun WasherScreen(
     onScanOrInput: (String) -> Unit,
     onSelectSaved: (String) -> Unit,
     onSelectModel: (Int) -> Unit,
-    onSelectTemperature: (Int) -> Unit,
     onSelectAddition: (String, Int?) -> Unit,
     onCreateOrder: () -> Unit,
     onPay: () -> Unit,
@@ -229,12 +229,17 @@ fun WasherScreen(
                                                         color = MaterialTheme.colorScheme.outline,
                                                     )
                                                     Spacer(Modifier.width(8.dp))
+                                                    // 占用徽标:只反映自己在这台上的进行中单。单台机器不显示任何数量,
+                                                    // 历史脏值(如"空闲 220/共 222")一律归一到"空闲"。
+                                                    val busy = saved.status == "使用中" || saved.status == "忙碌"
+                                                    val st = if (busy) "使用中" else "空闲"
+                                                    val stColor = if (busy) MaterialTheme.colorScheme.error
+                                                    else MaterialTheme.colorScheme.primary
                                                     Text(
-                                                        if (saved.status.isBlank()) "空闲" else saved.status,
+                                                        st,
                                                         fontSize = 11.sp,
                                                         fontWeight = FontWeight.Medium,
-                                                        color = if (saved.status == "忙碌") MaterialTheme.colorScheme.error
-                                                        else MaterialTheme.colorScheme.primary,
+                                                        color = stColor,
                                                     )
                                                 }
                                             }
@@ -277,33 +282,13 @@ fun WasherScreen(
                             }
                         }
                     }
-                    // 3. 温度选择(官方协议固定 4 档,按档加价)
-                    if (selectedModel != null) {
-                        item {
-                            OrderSection(title = "温度选择", tail = "请选择洗涤温度") {
-                                Row(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    UjingClient.TEMPERATURES.forEach { (id, name, surcharge) ->
-                                        OptionChip(
-                                            title = name,
-                                            subtitle = if (surcharge > 0) "+¥${UjingClient.fen2yuan(surcharge)}" else null,
-                                            selected = state.selectedTemperatureId == id,
-                                            modifier = Modifier.weight(1f),
-                                            onClick = { onSelectTemperature(id) },
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // 4. 加购组(洗衣液/除菌液…,来自所选模式的接口数据;不同机器可选项不同)
+                    // 3. 选项组:洗衣液/除菌液/温度/筒自洁…,均由接口 additionDevices/additionParams 动态返回。
+                    //    加热机器的模型才带 washTemperatureId 组 → 温度选择只在其上出现;加购型额外给"不添加"。
                     selectedModel?.additions?.forEach { group ->
                         item(key = group.key) {
-                            OrderSection(title = group.name, tail = "请选择用量") {
+                            OrderSection(title = group.name, tail = if (group.purchasable) "可选加购" else "请选择") {
                                 val options: List<Pair<Int?, Pair<String, Int>>> = buildList {
-                                    add(null to ("不添加" to 0))
+                                    if (group.purchasable) add(null to ("不添加" to 0))
                                     group.options.forEach { add(it.id to (it.name to it.priceFen)) }
                                 }
                                 options.chunked(3).forEach { rowOpts ->
@@ -314,7 +299,7 @@ fun WasherScreen(
                                         rowOpts.forEach { (optId, ui) ->
                                             OptionChip(
                                                 title = ui.first,
-                                                subtitle = if (ui.second > 0) "¥${UjingClient.fen2yuan(ui.second)}" else null,
+                                                subtitle = if (ui.second > 0) "+¥${UjingClient.fen2yuan(ui.second)}" else null,
                                                 selected = state.selectedAdditions[group.key] == optId,
                                                 modifier = Modifier.weight(1f),
                                                 onClick = { onSelectAddition(group.key, optId) },
@@ -326,15 +311,13 @@ fun WasherScreen(
                             }
                         }
                     }
-                    // 5. 下单(预估价 = 模式 + 水温加价 + 加购)
+                    // 4. 下单(预估价 = 模式 + 各选项组所选档位加价)
                     if (selectedModel != null) {
                         item {
-                            val tempFen = UjingClient.TEMPERATURES
-                                .firstOrNull { it.first == state.selectedTemperatureId }?.third ?: 0
                             val addFen = selectedModel.additions.sumOf { g ->
                                 g.options.firstOrNull { it.id == state.selectedAdditions[g.key] }?.priceFen ?: 0
                             }
-                            val estimate = selectedModel.priceFen + tempFen + addFen
+                            val estimate = selectedModel.priceFen + addFen
                             Button(
                                 onClick = onCreateOrder,
                                 enabled = !state.loading,
@@ -362,6 +345,14 @@ fun WasherScreen(
                                         fontWeight = FontWeight.Medium,
                                         color = MaterialTheme.colorScheme.primary,
                                     )
+                                    if (state.selfCleanOrdered) {
+                                        Text(
+                                            "本单含筒自洁:自洁完成后需再次点击「启动洗衣」开始洗涤",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.tertiary,
+                                            modifier = Modifier.padding(top = 2.dp),
+                                        )
+                                    }
                                     if (order.payPrice.isNotBlank()) {
                                         Text("金额:${order.payPrice}", fontSize = 13.sp)
                                     }
@@ -387,6 +378,14 @@ fun WasherScreen(
                                         )
                                     }
                                     Spacer(Modifier.height(8.dp))
+                                    if (order.status == "35") {
+                                        Text(
+                                            "筒自洁已完成,请在 5 分钟内点击「启动洗衣」,否则订单会自动取消",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.padding(bottom = 6.dp),
+                                        )
+                                    }
                                     Row {
                                         if (order.status == "10") {
                                             Button(onClick = onPay, enabled = !state.loading) {
@@ -397,7 +396,7 @@ fun WasherScreen(
                                         TextButton(onClick = onRefreshOrder, enabled = !state.loading) {
                                             Text("刷新状态")
                                         }
-                                        if (order.status == "20") {
+                                        if (UjingClient.canStartWash(order.status)) {
                                             Button(onClick = onStartWash, enabled = !state.loading) {
                                                 Text("启动洗衣")
                                             }

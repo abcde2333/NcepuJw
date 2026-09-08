@@ -47,6 +47,23 @@ class IlifeClient {
             -82 -> "需要支付"
             else -> msg.ifBlank { "错误 code=$code" }
         }
+
+        /**
+         * 设备控制操作(start/end)专用:-2 等在设备语境里并非"验证码错误",
+         * 多为频控/需人机验证/上一笔未结束等,统一以服务器真实 msg 为准,避免误导。
+         */
+        fun readableDevice(code: Int, msg: String): String = when (code) {
+            0 -> "成功"
+            -99 -> "登录已过期,请重新登录"
+            -21 -> "需要设备控制登录,请用同一手机号再登录一次"
+            -88 -> "未签约代扣协议,请先在慧生活 App 完成签约"
+            -87 -> "签约已过期,请重新签约"
+            -52 -> "账户欠费,请充值后使用"
+            -20 -> "未绑定一卡通账号,请先在慧生活 App 绑定"
+            -19 -> "设备准备中,请稍候再试"
+            -82 -> "需要支付"
+            else -> if (msg.isNotBlank()) msg else "操作失败(code=$code),请稍候再试"
+        }
     }
 
     private val client = OkHttpClient.Builder()
@@ -117,6 +134,29 @@ class IlifeClient {
             if (id.isNotBlank()) out += id to o.optString("name", "")
         }
         out.reversed()
+    }
+
+    /**
+     * 设备实时状态(专用接口 ui/app/dev/status)。
+     * status:99=空闲,非99=正在出水;out=本次累计出水量(升)。参考 Super798App。
+     */
+    data class DevStatus(val status: Int, val out: Double, val vel: Double) {
+        val drinking: Boolean get() = status != 99
+    }
+
+    suspend fun deviceStatus(token: String, did: String): DevStatus? = withContext(Dispatchers.IO) {
+        val r = request(
+            "GET", "$BASE/ui/app/dev/status?did=$did&more=true&promo=false",
+            null, token, appType = APP_TYPE_APP,
+        )
+        if (!r.ok) return@withContext null
+        val gene = r.json?.optJSONObject("data")?.optJSONObject("device")?.optJSONObject("gene")
+            ?: return@withContext null
+        DevStatus(
+            status = gene.optInt("status", 99),
+            out = if (gene.has("out")) gene.optDouble("out", 0.0) else 0.0,
+            vel = if (gene.has("vel")) gene.optDouble("vel", 0.0) else 0.0,
+        )
     }
 
     /** 启动饮水机 */

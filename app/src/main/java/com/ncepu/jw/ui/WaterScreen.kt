@@ -2,6 +2,7 @@ package com.ncepu.jw.ui
 
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +40,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -281,14 +283,19 @@ fun WaterScreen(
                                         )
                                     }
                                     Text(
-                                        if (running) "出水…" else "启动",
+                                        if (running) "结束出水" else "出水",
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.Bold,
                                         modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(
+                                                if (running) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                                else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                                            )
                                             .clickable {
                                                 if (running) onEndDevice(did) else onStartDevice(did)
                                             }
-                                            .padding(8.dp),
+                                            .padding(horizontal = 12.dp, vertical = 6.dp),
                                     )
                                 }
                                 Text(

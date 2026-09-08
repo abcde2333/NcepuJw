@@ -63,12 +63,15 @@ fun ProfileScreen(
                 )
                 Column(Modifier.padding(start = 16.dp)) {
                     Text(
-                        name?.takeIf { it.isNotBlank() } ?: account,
+                        name?.takeIf { it.isNotBlank() }
+                            ?: account.ifBlank { if (loggedIn) "已登录" else "未登录" },
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                     )
                     Text(
-                        if (name.isNullOrBlank()) "已登录" else "学号 $account",
+                        if (!loggedIn) "点击下方「登录教务系统」查看课表"
+                        else if (name.isNullOrBlank()) "已登录"
+                        else "学号 $account",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.outline,
                     )

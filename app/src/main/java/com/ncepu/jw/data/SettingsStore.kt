@@ -59,6 +59,7 @@ class SettingsStore(context: Context) {
         const val KEY_SEL_CACHE = "selection_cache"
         const val KEY_SCHED_SOURCE = "schedule_source" // AUTO=联网 / MANUAL=手动导入
         const val KEY_UPDATE_CHECK = "update_last_check"
+        const val KEY_UPDATE_SNOOZE = "update_snooze_code" // 已"以后再说"的版本
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
         const val KEY_CRED_TYPE = "credential_type" // jwxt=教务密码 / sso=统一身份认证密码
@@ -115,6 +116,11 @@ class SettingsStore(context: Context) {
     var lastUpdateCheck: Long
         get() = prefs.getLong(KEY_UPDATE_CHECK, 0L)
         set(v) = prefs.edit().putLong(KEY_UPDATE_CHECK, v).apply()
+
+    /** 用户对某版本点过"以后再说":同版本不再弹窗,出现更新版本会再次提醒 */
+    var updateSnoozeCode: Long
+        get() = prefs.getLong(KEY_UPDATE_SNOOZE, 0L)
+        set(v) = prefs.edit().putLong(KEY_UPDATE_SNOOZE, v).apply()
 
     var fontScale: Float
         get() = prefs.getFloat(KEY_FONT, 1.0f)
@@ -278,16 +284,15 @@ class SettingsStore(context: Context) {
         }
 
     fun addWasherDevice(did: String, name: String, deviceTypeId: Int = 0, storeId: String = "", status: String = "") {
-        val old = washerDevices.firstOrNull { it.did == did }
-        val list = washerDevices.filter { it.did != did }.toMutableList()
-        list.add(
-            SavedWasher(
-                did = did, name = name.ifBlank { old?.name ?: "" },
-                deviceTypeId = if (deviceTypeId > 0) deviceTypeId else (old?.deviceTypeId ?: 0),
-                storeId = storeId.ifBlank { old?.storeId ?: "" },
-                status = status.ifBlank { old?.status ?: "" },
-            )
+        val list = washerDevices.toMutableList()
+        val idx = list.indexOfFirst { it.did == did }
+        val merged = SavedWasher(
+            did = did, name = name.ifBlank { list.getOrNull(idx)?.name ?: "" },
+            deviceTypeId = if (deviceTypeId > 0) deviceTypeId else (list.getOrNull(idx)?.deviceTypeId ?: 0),
+            storeId = storeId.ifBlank { list.getOrNull(idx)?.storeId ?: "" },
+            status = status.ifBlank { list.getOrNull(idx)?.status ?: "" },
         )
+        if (idx >= 0) list[idx] = merged else list.add(merged)  // 就地更新,不改变顺序
         washerDevices = list
     }
 
