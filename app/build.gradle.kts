@@ -12,8 +12,8 @@ android {
         applicationId = "com.ncepu.jw"
         minSdk = 26
         targetSdk = 35
-        versionCode = 49
-        versionName = "4.18"
+        versionCode = 50
+        versionName = "4.19"
     }
 
     signingConfigs {

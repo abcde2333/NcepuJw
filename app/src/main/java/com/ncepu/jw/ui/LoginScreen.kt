@@ -84,8 +84,16 @@ fun LoginScreen(
     onSkip: () -> Unit = {},
     onSsoLogin: () -> Unit = {},
     onSsoWebLogin: () -> Unit = {},
+    ssoOnly: Boolean = false,
+    onModeChange: (Boolean) -> Unit = {},   // 参数:是否切到"统一认证"(用于回填各模式独立存的凭据)
 ) {
-    var mode by remember { mutableStateOf(LoginMode.JWXT) }
+    // 校外模式:仅统一认证登录(建隧道),隐藏教务密码方式
+    var mode by remember(ssoOnly) {
+        mutableStateOf(if (ssoOnly) LoginMode.SSO else LoginMode.JWXT)
+    }
+    androidx.compose.runtime.LaunchedEffect(ssoOnly) { if (ssoOnly) mode = LoginMode.SSO }
+    // 进入登录页时按当前模式回填已存凭据(避免共用输入框串密码)
+    androidx.compose.runtime.LaunchedEffect(Unit) { onModeChange(mode == LoginMode.SSO) }
     var showPassword by remember { mutableStateOf(false) }
 
     // 液态玻璃折射源:品牌渐变 + 大校徽水印
@@ -139,17 +147,19 @@ fun LoginScreen(
             Spacer(Modifier.height(24.dp))
 
             // ---- 登录方式切换(液态玻璃胶囊,同悬浮底栏材质) ----
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                LoginMode.entries.forEach { m ->
-                    GlassModePill(
-                        mode = m,
-                        selected = mode == m,
-                        backdrop = backdrop,
-                        modifier = Modifier.weight(1f),
-                    ) { mode = m }
+            if (!ssoOnly) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    LoginMode.entries.forEach { m ->
+                        GlassModePill(
+                            mode = m,
+                            selected = mode == m,
+                            backdrop = backdrop,
+                            modifier = Modifier.weight(1f),
+                        ) { mode = m; onModeChange(m == LoginMode.SSO) }
+                    }
                 }
             }
             Spacer(Modifier.height(20.dp))
@@ -213,9 +223,9 @@ fun LoginScreen(
                 }
             }
 
-            // 统一认证模式下的降级入口(图形验证码接口服务端已损坏/MFA 时使用)
+            // 统一认证模式下的降级入口(仅校内直连时;校外模式走隧道+短信,不开 WebView)
             AnimatedVisibility(
-                visible = mode == LoginMode.SSO,
+                visible = mode == LoginMode.SSO && !ssoOnly,
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically(),
             ) {

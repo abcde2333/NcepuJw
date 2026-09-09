@@ -8,7 +8,11 @@
 ## 功能
 
 ### 教务
-- **登录**:教务系统账号密码(与网页端一致),逆向了登录页 JS 的字符交织加密;支持记住密码自动登录;登录入口在「我的」页,可跳过(不影响生活服务)
+- **登录**:两种方式,凭据分别保存、互不覆盖
+  - **教务密码**(强智直登,与网页端一致,逆向登录页 JS 的字符交织加密)
+  - **统一身份认证**(账号密码走 `ids.ncepu.edu.cn` 协议直登:OAuth2 + SM2 加密密码;若账号启用了**短信多因素验证(MFA)**,在 App 内输入短信码即可完成,无需跳网页)
+  - 支持记住密码自动登录;入口在「我的」页,可跳过(不影响生活服务)
+- **校外模式(免校园网)**:在「设置 → 网络」开启后,教务/统一认证流量经学校 `myvpn.ncepu.edu.cn` 深信服 WebVPN 隧道转发,**无需校园网或另装 EasyConnect**;登录页只显示统一认证方式,会话过期自动重连(按需再弹一次短信码)
 - **课表**:全量抓取 `xskb_list.do` + 本地按周过滤,HorizontalPager 无缝左右滑周;表头显示日期(以官方当前周锚定);上课地点、大节时间;同课程同色;XLS 导出接口(`xskb_print.do`)解析作为备用数据源(同课多段自动合并)
 - **成绩**:按学期查询,自动计算加权平均分、绩点、总学分(首次查看前需在网页端/WebView 完成评教)
 - **考试安排**:按学期查询 + 考试开始前通知提醒
@@ -109,7 +113,33 @@ GET  orders/{id}/control/start|stop
 
 - 会话失效表现:任何页面返回 853 字节错误页(含 `chucuole.gif`)→ 需重新登录
 - **短时间高频登录会触发服务端持续限制**(数十分钟内所有请求返回错误页),正常使用(每天自动登录 1-2 次)无影响,自动化测试需注意频率
-- WebVPN:泛解析存在但网关从公网不可达、门户无 Web 转发资源 → 纯客户端 WebVPN 通道不可行;校外使用请装官方 EasyConnect(服务器 ycbg.ncepu.edu.cn)
+- **校外模式 / WebVPN(已实现,见 §7)**:学校有公网可达的深信服 WebVPN `myvpn.ncepu.edu.cn`,App 内以「加密代理 URL + 统一认证(含短信 MFA)」方式在校外直连教务。早期"WebVPN 不可行"的结论有误——门户可达、支持把校内 URL 编码后代理转发。(备选:官方 EasyConnect,服务器 `ycbg.ncepu.edu.cn`)
+
+### 7. 校外模式(深信服 WebVPN)
+
+无需校园网/EasyConnect,把教务(`jwxt.ncepu.edu.cn`)、统一认证(`ids.ncepu.edu.cn`)流量经学校公网门户 `myvpn.ncepu.edu.cn` 转发。参考开源 [lcandy2/webvpn-converter](https://github.com/lcandy2/webvpn-converter)(其配置中华电 host=`myvpn.ncepu.edu.cn`,默认 key/iv)。实现见 [`Webvpn.kt`](app/src/main/java/com/ncepu/jw/data/Webvpn.kt)、[`JwClient.webvpnLogin`](app/src/main/java/com/ncepu/jw/data/JwClient.kt)。
+
+**代理 URL 编码**:校内 `https://<host><path>` → `https://myvpn.ncepu.edu.cn/https/<enc(host)><path>`,其中
+`enc(host) = hex(iv) + AES-CFB128(key, iv, host补'0'到16的倍数)[:len(host)]`,`key = iv = "wrdvpnisthebest!"`(AES 分组密码反馈 128 位,NoPadding)。
+
+**登录链(统一认证 CAS + 短信 MFA)**,全程用主 OkHttp client(一个 cookieStore 同时持 `wengine_vpn_ticket…` 与教务 `JSESSIONID`,Sangfor 侧按 wengine 会话自动附带内网 cookie):
+```
+GET  myvpn/login                                          # 领 wengine_vpn_ticket + route
+GET  <proxied ids>/authserver/login?service=myvpn/login?cas_login=true   # 存 COOKIE_INFO
+GET  myvpn/wengine-vpn/cookie?method=get&host=ids.ncepu.edu.cn&path=/     # 桥读 flowKey(COOKIE_INFO)
+GET  <proxied ids>/authserver/api/reset/rules             # SM2 公钥
+POST <proxied ids>/authserver/username-password/login     # {flowKey,username,password=SM2(C1C3C2,加04前缀,Base64)}
+     → 160001 需 MFA:
+POST <proxied ids>/authserver/sms/code  {flowKey,username,captchaData:""} # 发码
+POST <proxied ids>/authserver/mfa/sms   {flowKey,username,smsCode}         # 验码
+GET  <proxied ids>/authserver/login?service=...           # → ticket=ST- → myvpn token-login,隧道认证化
+GET  <proxied ids>/authserver/oauth2/authorize?client_id=…&redirect_uri=…jwxt/Logon.do  # 复用 TGT → code → 建教务会话
+```
+- 回调里的教务别名域 `jwxt.hcc.edu.cn` 统一归一到 `jwxt.ncepu.edu.cn`,否则会话绑错域。
+- 拦截器 `WebvpnInterceptor` 在开关打开时把三个校内域请求改写成代理 URL(含 `Referer`),关闭时原样透传;选课/教学评价的 WebView 也据此代理并把 wengine cookie 种到 myvpn 域。
+- 选课链接 `href` 经 `JwClient.campusUrlOf` 归一(剥代理前缀 / 绝对 / 根路径 / 相对选课页目录)。
+
+局限:**密码通过后强制短信验证码**,故为半自动(每次新隧道会话输一次码);U净/慧生活/自动更新是公网服务,不经此隧道。
 
 ## 构建与运行
 

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material3.AlertDialog
@@ -93,6 +94,8 @@ fun SettingsScreen(
     scheduleSource: String = "AUTO",
     onImportScheduleXls: () -> Unit = {},
     onUseImportedChange: (Boolean) -> Unit = {},
+    webvpnEnabled: Boolean = false,
+    onWebvpnChange: (Boolean) -> Unit = {},
     update: com.ncepu.jw.update.Updater.State = com.ncepu.jw.update.Updater.State.Idle,
     currentVersion: String = "",
     onCheckUpdate: () -> Unit = {},
@@ -443,6 +446,23 @@ fun SettingsScreen(
         )
         HorizontalDivider(Modifier.padding(horizontal = 16.dp))
 
+        // ---------- 网络 ----------
+        SectionHeader(Icons.Filled.Public, "网络")
+        ListItem(
+            headlineContent = { Text("校外模式(免校园网)") },
+            supportingContent = {
+                Text(
+                    if (webvpnEnabled)
+                        "开启中:教务/统一认证走 myvpn 隧道,登录需一次短信验证码"
+                    else
+                        "关闭:需校园网或已连 EasyConnect。开启后可在校外直接访问教务",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            trailingContent = {
+                Switch(checked = webvpnEnabled, onCheckedChange = onWebvpnChange)
+            },
+        )
         HorizontalDivider(Modifier.padding(horizontal = 16.dp))
 
         Spacer(Modifier.height(24.dp))

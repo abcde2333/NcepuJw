@@ -47,6 +47,7 @@ class SettingsStore(context: Context) {
         const val KEY_BG_DIM = "schedule_bg_dim"       // 0..1
         const val KEY_REMIND = "reminder_enabled"      // 上课提醒
         const val KEY_EXAM_REMIND = "exam_reminder_enabled" // 考试提醒
+        const val KEY_WEBVPN = "webvpn_enabled"            // 校外模式(免校园网 WebVPN)
         const val KEY_LEAD = "reminder_lead_minutes"
         const val KEY_TIMES = "section_times"
         const val KEY_WEEK_START = "week_start_millis" // 第一周周一 00:00
@@ -63,6 +64,8 @@ class SettingsStore(context: Context) {
         const val KEY_UPDATE_SNOOZE = "update_snooze_code" // 已"以后再说"的版本
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
+        private const val KEY_SSO_ACCOUNT = "sso_account"
+        private const val KEY_SSO_PASSWORD = "sso_password"
         const val KEY_CRED_TYPE = "credential_type" // jwxt=教务密码 / sso=统一身份认证密码
 
         /** 五大节默认起始时间(大节=两小节连上),依华电实际作息:
@@ -152,6 +155,11 @@ class SettingsStore(context: Context) {
     var examReminderEnabled: Boolean
         get() = prefs.getBoolean(KEY_EXAM_REMIND, true)
         set(v) = prefs.edit().putBoolean(KEY_EXAM_REMIND, v).apply()
+
+    /** 校外模式:教务/统一认证流量走 myvpn 深信服 WebVPN 隧道(默认关=校园网/VPN 直连) */
+    var webvpnEnabled: Boolean
+        get() = prefs.getBoolean(KEY_WEBVPN, false)
+        set(v) = prefs.edit().putBoolean(KEY_WEBVPN, v).apply()
 
     var leadMinutes: Int
         get() = prefs.getInt(KEY_LEAD, 10)
@@ -362,21 +370,35 @@ class SettingsStore(context: Context) {
 
     // ---------- 登录凭据 ----------
 
-    /** type: "jwxt"=教务密码 / "sso"=统一身份认证密码(重启时走对应登录链路) */
+    /**
+     * 分别存储两套凭据:type="jwxt" 存教务(account=学号, password=教务密码),
+     * type="sso" 存统一身份认证(account, password=统一认证密码)。二者互不覆盖。
+     */
     fun storeCredentials(account: String, password: String, type: String = "jwxt") {
-        prefs.edit().putString(KEY_ACCOUNT, account).putString(KEY_PASSWORD, password)
-            .putString(KEY_CRED_TYPE, type).apply()
+        val e = prefs.edit().putString(KEY_CRED_TYPE, type)
+        if (type == "sso") e.putString(KEY_SSO_ACCOUNT, account).putString(KEY_SSO_PASSWORD, password)
+        else e.putString(KEY_ACCOUNT, account).putString(KEY_PASSWORD, password)
+        e.apply()
     }
 
     fun clearCredentials() {
-        prefs.edit().remove(KEY_ACCOUNT).remove(KEY_PASSWORD).remove(KEY_CRED_TYPE).apply()
+        prefs.edit().remove(KEY_ACCOUNT).remove(KEY_PASSWORD)
+            .remove(KEY_SSO_ACCOUNT).remove(KEY_SSO_PASSWORD).remove(KEY_CRED_TYPE).apply()
     }
 
     fun credentialType(): String = prefs.getString(KEY_CRED_TYPE, null) ?: "jwxt"
 
+    /** 教务凭据(account=学号, password=教务密码) */
     fun loadCredentials(): Pair<String, String>? {
         val acc = prefs.getString(KEY_ACCOUNT, null) ?: return null
         val pwd = prefs.getString(KEY_PASSWORD, null) ?: return null
+        return acc to pwd
+    }
+
+    /** 统一身份认证凭据 */
+    fun loadSsoCredentials(): Pair<String, String>? {
+        val acc = prefs.getString(KEY_SSO_ACCOUNT, null) ?: return null
+        val pwd = prefs.getString(KEY_SSO_PASSWORD, null) ?: return null
         return acc to pwd
     }
 

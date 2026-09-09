@@ -50,6 +50,9 @@ class WebViewActivity : ComponentActivity() {
 
         /** SSO 登录成功后回传的教务会话 cookie,宿主读取后清空 */
         var ssoCookies: String? = null
+
+        /** 校外模式:URL 已是 myvpn 代理形式,会话 cookie 需种到 myvpn 域 */
+        var webvpnMode: Boolean = false
     }
 
     private var progress by mutableStateOf(0f)
@@ -71,8 +74,9 @@ class WebViewActivity : ComponentActivity() {
         cookieManager.setAcceptCookie(true)
         if (!sso) {
             webSession?.let { session ->
+                val dom = if (webvpnMode) com.ncepu.jw.data.Webvpn.MYVPN else JwClient.DEFAULT_BASE
                 for (pair in session.split("; ")) {
-                    cookieManager.setCookie(JwClient.DEFAULT_BASE, pair)
+                    cookieManager.setCookie(dom, pair)
                 }
             }
         } else {

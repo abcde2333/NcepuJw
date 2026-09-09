@@ -46,12 +46,35 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
         const val DEFAULT_BASE = "https://jwxt.ncepu.edu.cn"
         private val ALERT_REGEX = Regex("""alert\s*\(\s*['"](.+?)['"]\s*\)""", RegexOption.DOT_MATCHES_ALL)
         private const val NAME_BLACKLIST = "性别|民族|籍贯|出生|政治|面貌|姓名|学院|专业|班级|国籍"
+
+        /** Sangfor 代理前缀:/https/<16+位hex 密文>/<真实路径>,把被改写的链接还原成教务真实路径 */
+        private val PROXY_PREFIX = Regex("/https/[0-9a-fA-F]{16,}(/.*)$")
+
+        /**
+         * 把选课列表页抓到的链接(可能是绝对 http、代理改写、根路径 /jsxsd、或相对)归一为干净的
+         * 教务绝对 URL,供 WebView(或再包一层代理)使用。
+         */
+        fun campusUrlOf(link: String): String {
+            val p = PROXY_PREFIX.find(link)?.groupValues?.get(1) ?: link
+            return when {
+                p.startsWith("http") -> p
+                p.startsWith("/") -> DEFAULT_BASE + p
+                else -> "$DEFAULT_BASE/jsxsd/xsxk/$p"   // 相对选课列表页 /jsxsd/xsxk/xklc_list 目录
+            }
+        }
     }
 
     private val cookieStore = LinkedHashMap<String, Cookie>()
 
+    /** 校外模式拦截器(默认关;开启后把校内域请求改写为 myvpn WebVPN 代理 URL) */
+    private val webvpn = WebvpnInterceptor()
+    var webvpnEnabled: Boolean
+        get() = webvpn.enabled
+        set(v) { webvpn.enabled = v }
+
     private val client = OkHttpClient.Builder()
         .followRedirects(false)
+        .addInterceptor(webvpn)
         .cookieJar(object : CookieJar {
             override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
                 synchronized(cookieStore) { for (c in cookies) cookieStore[c.name] = c }
@@ -102,6 +125,127 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
         studentName ?: ""
     }
 
+    // ---------- 校外模式:myvpn 深信服 WebVPN + 统一认证(短信 MFA)建隧道 ----------
+    /** 隧道会话是否已就绪(wengine + 教务 JSESSIONID 均在主 cookieStore) */
+    @Volatile var webvpnReady = false
+
+    private fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+
+    private fun wGet(url: String): Request =
+        Request.Builder().url(url).header("User-Agent", UA).header("Referer", "$baseUrl/").build()
+
+    private fun wPostJson(url: String, json: JSONObject): Request =
+        Request.Builder().url(url).header("User-Agent", UA).header("Referer", "$SSO_IDS/")
+            .post(json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
+
+    private fun wBody(call: Request): String =
+        client.newCall(call).execute().use { it.body?.string().orEmpty() }
+
+    /** 统一认证回调把教务别名域 hcc 归一到 ncepu(与 ssoLogin 一致),避免隧道按不同域分别会话 */
+    private fun normJwxt(u: String) = u.replace("jwxt.hcc.edu.cn", "jwxt.ncepu.edu.cn")
+
+    /** 手动跟随 302 链(相对当前 URL 解析 + hcc→ncepu 归一),会话 cookie 入主 jar;返回最终 URL */
+    private fun wFollow(startUrl: String, maxHops: Int = 8): String {
+        var cur = normJwxt(startUrl)
+        repeat(maxHops) {
+            val resp = client.newCall(wGet(cur)).execute()
+            val loc = resp.header("Location")
+            resp.close()
+            if (resp.code in 300..399 && loc != null) {
+                cur = normJwxt(cur.toHttpUrl().resolve(loc)?.toString() ?: return cur)
+            } else return cur
+        }
+        return cur
+    }
+
+    /** 从 Sangfor cookie 桥响应中解析 flowKey */
+    private fun extractFlowKey(bridgeBody: String): String? {
+        val m = Regex("COOKIE_INFO=([^;\\s]+)").find(bridgeBody) ?: return null
+        val v = m.groupValues[1]
+        parseFlowKey(v)?.let { return it }
+        parseFlowKey(java.net.URLDecoder.decode(v, "UTF-8"))?.let { return it }
+        return Regex("flow\\.[0-9a-f]+").find(java.net.URLDecoder.decode(v, "UTF-8"))?.value
+    }
+
+    /**
+     * 校外模式登录。全程用主 client(拦截器已开启,校内 URL 自动代理),使 wengine 与教务
+     * JSESSIONID 同处一个 cookieStore。`smsProvider` 在需要短信 MFA 时挂起取用户输入的验证码。
+     * 返回 null=成功(隧道+教务会话就绪);非 null=可读错误。
+     */
+    suspend fun webvpnLogin(account: String, password: String, smsProvider: suspend () -> String): String? =
+        withContext(Dispatchers.IO) {
+            try {
+                webvpn.enabled = true
+                webvpnReady = false
+                // 1) 领 myvpn 会话(wengine_vpn_ticket + route)
+                wBody(wGet("${Webvpn.MYVPN}/login"))
+                // 2) authserver 初始化,使 Sangfor 侧存储 ids 的 COOKIE_INFO(flowKey 载体)
+                wFollow("$SSO_IDS/authserver/login?service=${enc(Webvpn.MYVPN + "/login?cas_login=true")}")
+                // 3) 经 cookie 桥读 flowKey
+                val bridge = wBody(wGet("${Webvpn.MYVPN}/wengine-vpn/cookie?method=get&host=ids.ncepu.edu.cn&scheme=https&path=/&vpn_timestamp=1"))
+                val flowKey = extractFlowKey(bridge) ?: return@withContext "无法建立校外隧道会话(flowKey)"
+                // 4) 公钥 + SM2 密码登录
+                val rules = JSONObject(wBody(wGet("$SSO_IDS/authserver/api/reset/rules")))
+                val publicKey = rules.optJSONObject("data")?.optJSONObject("encrypt")?.optString("publicKey", "")
+                if (publicKey.isNullOrBlank()) return@withContext "统一认证公钥获取失败"
+                val login = JSONObject(wBody(wPostJson(
+                    "$SSO_IDS/authserver/username-password/login",
+                    JSONObject().put("flowKey", flowKey).put("username", account)
+                        .put("password", sm2Encrypt(password, publicKey)))))
+                val lcode = login.optString("code", login.optLong("code", -1L).toString())
+                if (lcode != "666666") {
+                    if (lcode == "160001" || lcode == "160074") {
+                        // 发码 → 收码 → 验码
+                        wBody(wPostJson(
+                            "$SSO_IDS/authserver/sms/code?vpn-12-o2-ids.ncepu.edu.cn",
+                            JSONObject().put("flowKey", flowKey).put("username", account).put("captchaData", "")))
+                        val code = smsProvider()
+                        if (code.isBlank()) return@withContext "已取消校外登录"
+                        val mfa = JSONObject(wBody(wPostJson(
+                            "$SSO_IDS/authserver/mfa/sms?vpn-12-o2-ids.ncepu.edu.cn",
+                            JSONObject().put("flowKey", flowKey).put("username", account).put("smsCode", code))))
+                        val mcode = mfa.optString("code", mfa.optLong("code", -1L).toString())
+                        if (mcode != "666666")
+                            return@withContext when (mcode) {
+                                "170003" -> "短信验证码错误,请重试"
+                                else -> mfa.optString("message").ifBlank { "多因素验证失败($mcode)" }
+                            }
+                    } else {
+                        return@withContext when (lcode) {
+                            "170002" -> "用户名或密码错误"
+                            "180028" -> "登录失败次数过多,账号已锁定 30 分钟"
+                            "180029" -> "账号已被锁定,请联系管理员"
+                            "180030" -> "该账号无教务系统访问权限"
+                            else -> login.optString("message").ifBlank { "统一认证登录失败($lcode)" }
+                        }
+                    }
+                }
+                // 5) 换 CAS ticket 并走完 token-login,使 wengine 会话认证化
+                wFollow("$SSO_IDS/authserver/login?service=${enc(Webvpn.MYVPN + "/login?cas_login=true")}")
+                // 6) 经隧道做 jwxt OAuth,建立教务 JSESSIONID(复用已存在的 authserver TGT,不再 MFA)
+                val authFinal = wFollow("$SSO_IDS/authserver/oauth2/authorize?client_id=$SSO_CLIENT_ID&response_type=code" +
+                    "&redirect_uri=${enc(SSO_REDIRECT_URI)}")
+                // 7) 校验教务会话。注意:已登录的 xsMain 大页里也含 "method=logon"(登出/脚本引用),
+                //    不能用通用 isSessionLost 的模糊启发式;只按硬失效标志判定。
+                val main = wBody(wGet("$baseUrl/jsxsd/framework/xsMain.jsp"))
+                val lost = main.contains("chucuole") || main.length < 2000
+                if (lost) {
+                    val hint = if (authFinal.contains("xsMain") || authFinal.contains("Logon.do")) "已到$authFinal" else "停在$authFinal"
+                    return@withContext "校外隧道已认证,但教务会话建立失败($hint; 主页面 ${main.length}B)"
+                }
+                loggedIn = true
+                tryFetchName()?.let { studentName = it }
+                webvpnReady = true
+                null
+            } catch (e: Exception) {
+                "校外登录异常:${e.message}"
+            }
+        }
+
+    /** 导出当前会话 cookie 名值对(供 WebView 复用校外隧道会话) */
+    fun cookiePairs(): List<Pair<String, String>> =
+        synchronized(cookieStore) { cookieStore.values.map { it.name to it.value } }
+
     // ---------- 统一身份认证直登(金智 authserver,OAuth2 壳) ----------
     // 协议:authorize(种 COOKIE_INFO=flowKey) → api/reset/rules(SM2 公钥)
     //   → info-query(验证码/MFA 预检) → username-password/login(SM2 C1C3C2 密文)
@@ -124,6 +268,7 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
 
     private val ssoHttpClient = OkHttpClient.Builder()
         .followRedirects(false)
+        .addInterceptor(webvpn)
         .cookieJar(ssoCookieJar)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -181,11 +326,19 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
             ?: json.optString("flowKey", "").takeIf { it.isNotBlank() }
     }.getOrNull()
 
-    /** 统一身份认证直登。返回 null=成功;非 null=用户可读错误 */
-    suspend fun ssoLogin(account: String, password: String): String? = withContext(Dispatchers.IO) {
+    /**
+     * 统一身份认证直登。返回 null=成功;非 null=用户可读错误。
+     * 若账号启用了短信 MFA(密码通过后返回 160001),且提供了 [smsProvider],则内联走
+     * 发码→取码→验证;[smsProvider] 为空时回退"请使用网页登录"(旧行为)。
+     */
+    suspend fun ssoLogin(
+        account: String,
+        password: String,
+        smsProvider: (suspend () -> String)? = null,
+    ): String? = withContext(Dispatchers.IO) {
         var lastError: String? = null
         repeat(2) {
-            val result = ssoLoginOnce(account, password)
+            val result = ssoLoginOnce(account, password, smsProvider)
             if (result == null) return@withContext null
             lastError = result
             if (result != SSO_RETRY_FLOWKEY) return@withContext result
@@ -194,7 +347,11 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
         lastError
     }
 
-    private suspend fun ssoLoginOnce(account: String, password: String): String? =
+    private suspend fun ssoLoginOnce(
+        account: String,
+        password: String,
+        smsProvider: (suspend () -> String)?,
+    ): String? =
         withContext(Dispatchers.IO) {
             try {
                 // 1) authorize:种 COOKIE_INFO(含 flowKey)。
@@ -267,9 +424,32 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
                 ).execute().use { it.body?.string().orEmpty() }
                 val json = runCatching { JSONObject(loginBodyText) }.getOrNull()
                     ?: return@withContext "统一认证响应异常"
-                val code = json.optString("code", json.optLong("code", -1L).toString())
+                var authJson = json
+                var code = json.optString("code", json.optLong("code", -1L).toString())
                 val msg = json.optString("message", json.optString("msg", ""))
-                if (code != "666666") return@withContext when (code) {
+                if ((code == "160001" || code == "160074") && smsProvider != null) {
+                    // 短信 MFA:发码 → 收码(挂起取用户输入)→ 验证,成功沿用返回的 service
+                    runCatching {
+                        ssoHttpClient.newCall(ssoPost("$SSO_IDS/authserver/sms/code",
+                            JSONObject().put("flowKey", flowKey).put("username", account)
+                                .put("captchaData", ""))).execute().close()
+                    }
+                    val sms = smsProvider()
+                    if (sms.isBlank()) return@withContext "需要短信验证码,但未提供(已取消)"
+                    val mfaText = ssoHttpClient.newCall(ssoPost("$SSO_IDS/authserver/mfa/sms",
+                        JSONObject().put("flowKey", flowKey).put("username", account).put("smsCode", sms)))
+                        .execute().use { it.body?.string().orEmpty() }
+                    authJson = runCatching { JSONObject(mfaText) }.getOrNull()
+                        ?: return@withContext "短信验证响应异常"
+                    code = authJson.optString("code", authJson.optLong("code", -1L).toString())
+                    if (code != "666666") return@withContext when (code) {
+                        "170003" -> "短信验证码错误,请重新登录"
+                        "180028" -> "登录失败次数过多,账号已锁定 30 分钟"
+                        "180029" -> "账号已被锁定,请联系管理员"
+                        else -> authJson.optString("message", authJson.optString("msg", ""))
+                            .ifBlank { "短信验证失败($code)" }
+                    }
+                } else if (code != "666666") return@withContext when (code) {
                     "170002" -> "用户名或密码错误"
                     "170003" -> "验证码错误,请使用网页登录"
                     "160002" -> "该账号需要图形验证码,请使用网页登录"
@@ -282,7 +462,7 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
                     "180040", "180033" -> SSO_RETRY_FLOWKEY
                     else -> if (msg.isNotBlank()) msg else "统一认证错误 code=$code"
                 }
-                val service = json.optJSONObject("data")?.optString("service", "")
+                val service = authJson.optJSONObject("data")?.optString("service", "")
                 if (service.isNullOrBlank()) return@withContext "统一认证成功但未返回回调地址"
 
                 // 5) service 是相对 IDS 的 authorize 路径:带 TGC 再请求一次,

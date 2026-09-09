@@ -43,6 +43,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedTextField
+import com.ncepu.jw.data.Webvpn
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -145,6 +147,23 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var loginError by mutableStateOf<String?>(null)
     var loggedIn by mutableStateOf(false)
 
+    // 校外模式(WebVPN)
+    var webvpnEnabled by mutableStateOf(settings.webvpnEnabled)
+    // 短信验证码输入(校外登录 与 校内统一认证 MFA 共用)
+    var smsPrompt by mutableStateOf(false)
+    private var smsDeferred: kotlinx.coroutines.CompletableDeferred<String>? = null
+
+    /** 弹短信码输入框并挂起等待用户提交;返回输入的码(空=取消) */
+    private suspend fun requestSmsCode(): String =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            val d = kotlinx.coroutines.CompletableDeferred<String>()
+            smsDeferred = d; smsPrompt = true
+            try { d.await() } finally { smsPrompt = false; smsDeferred = null }
+        }
+
+    fun submitSms(code: String) { smsDeferred?.complete(code.trim()) }
+    fun cancelSms() { smsDeferred?.complete("") }
+
     var semesters: List<Semester> = Semester.options(8)
     var schedSem by mutableStateOf(Semester.current())
     var schedLoading by mutableStateOf(false)
@@ -215,6 +234,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var skippedLogin by mutableStateOf(false)   // 跳过教务登录(离线/仅用饮水机)
 
     init {
+        // 校外模式:进程启动即把开关下发到 JwClient 拦截器(后续教务请求据此改写)
+        runCatching { client.webvpnEnabled = settings.webvpnEnabled }
         // 首屏直出:同步预载(SharedPreferences 读毫秒级),保证首帧之前
         // 课表/选课缓存已就绪——异步预载存在首帧竞态,导入 XLS 后重启尤其明显
         runCatching { fallBackToCache() }
@@ -893,15 +914,19 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     fun tryAutoLogin() {
         if (skippedLogin) return
-        val creds = settings.loadCredentials()
+        // 校外模式用统一认证凭据;校内按上次登录类型选对应凭据(两套密码互不覆盖)
+        val creds = if (webvpnEnabled || settings.credentialType() == "sso")
+            settings.loadSsoCredentials() ?: settings.loadCredentials()
+        else settings.loadCredentials()
         if (creds != null && !loggedIn) {
             account = creds.first; password = creds.second
-            // 按存储的凭据类型走对应登录链路(统一认证密码 ≠ 教务密码)
+            if (webvpnEnabled) { webvpnLogin(); return }
             if (settings.credentialType() == "sso") doSsoLogin() else doLogin()
         }
     }
 
     fun doLogin() {
+        if (webvpnEnabled) { webvpnLogin(); return }
         loginLoading = true
         loginError = null
         viewModelScope.launch {
@@ -922,10 +947,11 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     /** 统一身份认证协议直登(账号密码走 ids.ncepu.edu.cn) */
     fun doSsoLogin() {
+        if (webvpnEnabled) { webvpnLogin(); return }
         loginLoading = true
         loginError = null
         viewModelScope.launch {
-            val err = client.ssoLogin(account.trim(), password)
+            val err = client.ssoLogin(account.trim(), password) { requestSmsCode() }
             loginLoading = false
             if (err == null) {
                 loggedIn = true
@@ -939,6 +965,50 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /** 设置:切换校外模式。开启后用统一认证账密建立 WebVPN 隧道并登录教务;关闭则回到直连。 */
+    fun toggleWebvpn(on: Boolean) {
+        webvpnEnabled = on
+        settings.webvpnEnabled = on
+        client.webvpnEnabled = on
+        if (!on) {
+            client.webvpnReady = false
+            return
+        }
+        // 开启:回填统一认证凭据(校外只用它),有则尝试走隧道登录(按需弹短信码)
+        val creds = settings.loadSsoCredentials()
+        if (account.isBlank() && creds != null) { account = creds.first; password = creds.second }
+        if (account.isNotBlank() && password.isNotBlank()) webvpnLogin()
+    }
+
+    /** 切换登录模式时按各自存储回填:有该模式凭据就填入,否则清掉密码(避免教务/统一认证密码互相串用) */
+    fun onLoginModeChanged(sso: Boolean) {
+        val c = if (sso) settings.loadSsoCredentials() else settings.loadCredentials()
+        if (c != null) { account = c.first; password = c.second }
+        else password = ""
+    }
+
+    /** 校外模式登录:统一认证(SM2)+ 短信 MFA(smsProvider 挂起等用户输入) */
+    fun webvpnLogin() {
+        if (account.isBlank() || password.isBlank()) { loginError = "请先输入统一认证账号和密码"; return }
+        loginLoading = true
+        loginError = null
+        viewModelScope.launch {
+            val err = client.webvpnLogin(account.trim(), password) { requestSmsCode() }
+            loginLoading = false
+            if (err == null) {
+                loggedIn = true
+                name = client.studentName
+                settings.storeCredentials(account.trim(), password, "sso")
+                loadSchedule(force = allCourses.isNotEmpty(), silent = allCourses.isNotEmpty())
+                loadGrades()
+            } else {
+                loginError = err
+                client.webvpnReady = false
+            }
+        }
+    }
+
 
     /** 统一身份认证(WebView)登录成功:导入会话 cookie 并校验 */
     fun completeWebLogin(cookieHeader: String) {
@@ -981,6 +1051,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             if (!fallBackToCache() && !silent) {
                 schedError = "请先在「我的」登录教务系统后加载课表"
             }
+            return
+        }
+        // 校外模式:隧道会话已过期(webvpnReady=false)则先自动重连(按需弹短信码),重连成功后会再刷新
+        if (webvpnEnabled && !client.webvpnReady) {
+            if (!silent) schedLoading = false
+            webvpnLogin()
             return
         }
         if (!silent) {
@@ -1030,6 +1106,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     schedError = if (full.isEmpty()) "本学期暂无课表(接口返回为空)" else null
                 }
             } catch (e: Exception) {
+                // 校外模式:若因会话过期/代理回登录页导致失败,清就绪标记,下次进页自动重连(按需弹码)
+                if (webvpnEnabled) {
+                    val m = e.message.orEmpty()
+                    if (m.contains("会话") || m.contains("登录") || m.contains("chucuole") ||
+                        m.contains("重新") ) client.webvpnReady = false
+                }
                 // 界面上还没有数据时优先回退本地缓存;失败且无缓存才显示错误
                 if (allCourses.isEmpty()) {
                     if (!fallBackToCache()) schedError = e.message ?: "加载失败"
@@ -1477,24 +1559,24 @@ class MainActivity : ComponentActivity() {
                             },
                             onEvaluate = {
                                 WebViewActivity.webSession = vm.client.cookieHeader()
+                                WebViewActivity.webvpnMode = vm.webvpnEnabled
+                                val raw = JwClient.DEFAULT_BASE + "/jsxsd/newxspj/zhxspj_list.do"
                                 evalLauncher.launch(
                                     Intent(ctx, WebViewActivity::class.java).apply {
-                                        putExtra(
-                                            WebViewActivity.EXTRA_URL,
-                                            JwClient.DEFAULT_BASE + "/jsxsd/newxspj/zhxspj_list.do",
-                                        )
+                                        putExtra(WebViewActivity.EXTRA_URL,
+                                            if (vm.webvpnEnabled) Webvpn.proxied(raw) else raw)
                                         putExtra(WebViewActivity.EXTRA_TITLE, "教学评价")
                                     }
                                 )
                             },
                             onEnterRound = { round ->
                                 WebViewActivity.webSession = vm.client.cookieHeader()
+                                WebViewActivity.webvpnMode = vm.webvpnEnabled
+                                val campus = JwClient.campusUrlOf(round.url)
+                                val raw = if (vm.webvpnEnabled) Webvpn.proxied(campus) else campus
                                 xkLauncher.launch(
                                     Intent(ctx, WebViewActivity::class.java).apply {
-                                        putExtra(
-                                            WebViewActivity.EXTRA_URL,
-                                            JwClient.DEFAULT_BASE + round.url,
-                                        )
+                                        putExtra(WebViewActivity.EXTRA_URL, raw)
                                         putExtra(WebViewActivity.EXTRA_TITLE, round.name.ifBlank { "选课" })
                                     }
                                 )
@@ -1596,12 +1678,12 @@ class MainActivity : ComponentActivity() {
                             onRetry = { vm.loadGrades() },
                             onEvaluate = {
                                 WebViewActivity.webSession = vm.client.cookieHeader()
+                                WebViewActivity.webvpnMode = vm.webvpnEnabled
+                                val raw = JwClient.DEFAULT_BASE + "/jsxsd/newxspj/zhxspj_list.do"
                                 evalLauncher.launch(
                                     Intent(ctx, WebViewActivity::class.java).apply {
-                                        putExtra(
-                                            WebViewActivity.EXTRA_URL,
-                                            JwClient.DEFAULT_BASE + "/jsxsd/newxspj/zhxspj_list.do",
-                                        )
+                                        putExtra(WebViewActivity.EXTRA_URL,
+                                            if (vm.webvpnEnabled) Webvpn.proxied(raw) else raw)
                                         putExtra(WebViewActivity.EXTRA_TITLE, "教学评价")
                                     }
                                 )
@@ -1646,6 +1728,8 @@ class MainActivity : ComponentActivity() {
                             scheduleSource = vm.scheduleSource,
                             onImportScheduleXls = { xlsPicker.launch("*/*") },
                             onUseImportedChange = { vm.setUseImportedXls(it) },
+                            webvpnEnabled = vm.webvpnEnabled,
+                            onWebvpnChange = { vm.toggleWebvpn(it) },
                             update = vm.updateState,
                             currentVersion = com.ncepu.jw.update.Updater.currentVersionName(ctx),
                             onCheckUpdate = { vm.checkForUpdate(force = true) },
@@ -1729,10 +1813,42 @@ class MainActivity : ComponentActivity() {
                                         .putExtra(WebViewActivity.EXTRA_SSO, true)
                                 )
                             },
+                            ssoOnly = vm.webvpnEnabled,
+                            onModeChange = { vm.onLoginModeChanged(it) },
                         )
                     }
                 }
         UpdateDialog(vm)
+        WebvpnSmsDialog(vm)
+    }
+
+    /** 统一认证短信 MFA 输入框(校内直连与校外隧道登录共用;密码通过后挂起等待) */
+    @Composable
+    private fun WebvpnSmsDialog(vm: AppViewModel) {
+        if (!vm.smsPrompt) return
+        var code by androidx.compose.runtime.remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { vm.cancelSms() },
+            title = { Text("短信验证") },
+            text = {
+                androidx.compose.foundation.layout.Column {
+                    Text("统一认证需要短信验证码,已向你绑定的手机号发送。")
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { code = it.filter { c -> c.isDigit() }.take(8) },
+                        label = { Text("短信验证码") },
+                        singleLine = true,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = { vm.submitSms(code) }, enabled = code.isNotBlank()) { Text("登录") }
+            },
+            dismissButton = { TextButton(onClick = { vm.cancelSms() }) { Text("取消") } },
+        )
     }
 
     /** 更新提醒弹窗:按状态呈现 发现新版/下载进度/可安装/失败;关闭=按版本免打扰 */

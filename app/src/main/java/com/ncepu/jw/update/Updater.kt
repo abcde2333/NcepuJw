@@ -26,16 +26,18 @@ object Updater {
     const val REPO_OWNER = "abcde2333"
     const val REPO_NAME = "NcepuJw"
 
-    /** 元数据候选(前者国内可达性最好) */
+    /** 元数据候选(前者国内可达性最好;fetchLatest 并行取各源最大版本,过期源不会误导) */
     private val METADATA_URLS = listOf(
         "https://cdn.jsdelivr.net/gh/$REPO_OWNER/$REPO_NAME@main/latest.json",
+        "https://fastgit.cc/https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/latest.json",
         "https://ghfast.top/https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/latest.json",
         "https://gh-proxy.com/https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/latest.json",
         "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/latest.json",
     )
 
-    /** 下载加速前缀(空串 = GitHub 直连兜底) */
+    /** 下载加速前缀(空串 = GitHub 直连兜底)。fastgit 实测直传二进制、且跟随 raw 最新,列首位 */
     private val DOWNLOAD_PREFIXES = listOf(
+        "https://fastgit.cc/",
         "https://ghfast.top/",
         "https://gh-proxy.com/",
         "",
