@@ -32,6 +32,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -75,6 +76,8 @@ data class WasherUiState(
     val currentOrder: WasherOrderInfo? = null,
     val payUrl: String = "",
     val savedWashers: List<com.ncepu.jw.data.SavedWasher> = emptyList(),
+    val isDryer: Boolean = false,             // 当前设备是烘干机
+    val dryTimeMinutes: Int = 60,             // 烘干机分计时时长(分钟)
 )
 
 /** 洗衣页:登录 → 扫码/输设备号 → 模式/温度/加购下单 → 支付 → 启动/状态 */
@@ -100,13 +103,39 @@ fun WasherScreen(
     onAutoStartChange: (Boolean) -> Unit = {},
     onRemoveWasher: (String) -> Unit = {},
     onScan: () -> Unit = {},
+    onDryTimeChange: (Int) -> Unit = {},
+    onSetWasherNote: (String, String) -> Unit = { _, _ -> },
     onBack: () -> Unit,
 ) {
+    var noteTarget by remember { mutableStateOf<SavedWasher?>(null) }   // 正在改备注的设备
+    noteTarget?.let { target ->
+        var text by remember(target.did) { mutableStateOf(target.note) }
+        AlertDialog(
+            onDismissRequest = { noteTarget = null },
+            title = { Text("设备备注") },
+            text = {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it.take(20) },
+                    label = { Text("如:三教2楼 / 南院1号") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onSetWasherNote(target.did, text.trim())
+                    noteTarget = null
+                }) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { noteTarget = null }) { Text("取消") } },
+        )
+    }
     Scaffold(
         containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
-                title = { Text("U净洗衣") },
+                title = { Text(if (state.isDryer) "U净烘干" else "U净洗衣") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -179,7 +208,7 @@ fun WasherScreen(
                     item {
                         Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
                             Column(Modifier.padding(12.dp)) {
-                                Text("1. 添加洗衣机", fontWeight = FontWeight.Bold)
+                                Text("1. 添加设备(洗衣机/烘干机)", fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.height(6.dp))
                                 InputDeviceRow(onScanOrInput, onScan)
                                 if (state.scannedDevice != null) {
@@ -198,7 +227,7 @@ fun WasherScreen(
                         item {
                             Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
                                 Column(Modifier.padding(12.dp)) {
-                                    Text("我的洗衣机", fontWeight = FontWeight.Bold)
+                                    Text("我的设备", fontWeight = FontWeight.Bold)
                                     Spacer(Modifier.height(6.dp))
                                     state.savedWashers.forEach { saved ->
                                         val selected = saved.did == state.scannedDevice
@@ -221,34 +250,49 @@ fun WasherScreen(
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
                                             Column(Modifier.weight(1f)) {
-                                                Text(
-                                                    saved.name.ifBlank { saved.did },
-                                                    fontSize = 13.sp,
-                                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                                    color = if (selected) MaterialTheme.colorScheme.primary
-                                                    else MaterialTheme.colorScheme.onSurface,
-                                                )
                                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                                     Text(
-                                                        "编号 " + saved.did,
+                                                        // 优先显示用户备注,否则设备号/编号
+                                                        saved.note.ifBlank { saved.name.ifBlank { saved.did } },
+                                                        fontSize = 13.sp,
+                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                                        color = if (selected) MaterialTheme.colorScheme.primary
+                                                        else MaterialTheme.colorScheme.onSurface,
+                                                    )
+                                                    if (saved.dryer) {
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Text(
+                                                            "烘干", fontSize = 10.sp,
+                                                            color = MaterialTheme.colorScheme.tertiary,
+                                                        )
+                                                    }
+                                                }
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(
+                                                        "编号 " + (saved.name.ifBlank { saved.did }),
                                                         fontSize = 11.sp,
                                                         color = MaterialTheme.colorScheme.outline,
                                                     )
                                                     Spacer(Modifier.width(8.dp))
-                                                    // 占用徽标:只反映自己在这台上的进行中单。单台机器不显示任何数量,
-                                                    // 历史脏值(如"空闲 220/共 222")一律归一到"空闲"。
+                                                    // 占用徽标:只反映自己在这台上的进行中单(使用中),否则空闲
                                                     val busy = saved.status == "使用中" || saved.status == "忙碌"
-                                                    val st = if (busy) "使用中" else "空闲"
-                                                    val stColor = if (busy) MaterialTheme.colorScheme.error
-                                                    else MaterialTheme.colorScheme.primary
                                                     Text(
-                                                        st,
+                                                        if (busy) "使用中" else "空闲",
                                                         fontSize = 11.sp,
                                                         fontWeight = FontWeight.Medium,
-                                                        color = stColor,
+                                                        color = if (busy) MaterialTheme.colorScheme.error
+                                                        else MaterialTheme.colorScheme.primary,
                                                     )
                                                 }
                                             }
+                                            Text(
+                                                "备注",
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier
+                                                    .clickable { noteTarget = saved }
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            )
                                             Text(
                                                 "删除",
                                                 fontSize = 12.sp,
@@ -275,9 +319,12 @@ fun WasherScreen(
                             },
                         ) {
                             Column {
-                                // 2. 洗涤模式(接口按设备返回,不同机器模式/价格不同)
+                                // 2. 程序(接口按设备返回,洗衣机=洗涤模式/烘干机=烘干程序)
                                 if (state.models.isNotEmpty()) {
-                                    OrderSection(title = "2. 洗涤模式", tail = "请选择洗涤模式") {
+                                    OrderSection(
+                                        title = if (state.isDryer) "2. 烘干程序" else "2. 洗涤模式",
+                                        tail = if (state.isDryer) "请选择烘干程序" else "请选择洗涤模式",
+                                    ) {
                                         state.models.chunked(4).forEach { rowModels ->
                                             Row(
                                                 Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -320,6 +367,22 @@ fun WasherScreen(
                                                     )
                                                 }
                                                 repeat(3 - rowOpts.size) { Spacer(Modifier.weight(1f)) }
+                                            }
+                                        }
+                                    }
+                                }
+                                // 烘干时长(仅烘干机,分计时;下单以 dryTime=分钟×10 提交)
+                                if (state.isDryer) {
+                                    OrderSection(title = "烘干时长", tail = "分计时计费") {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            listOf(30, 60, 90, 120).forEach { t ->
+                                                OptionChip(
+                                                    title = "$t 分",
+                                                    subtitle = null,
+                                                    selected = state.dryTimeMinutes == t,
+                                                    modifier = Modifier.weight(1f),
+                                                    onClick = { onDryTimeChange(t) },
+                                                )
                                             }
                                         }
                                     }
@@ -412,7 +475,7 @@ fun WasherScreen(
                                         }
                                         if (UjingClient.canStartWash(order.status)) {
                                             Button(onClick = onStartWash, enabled = !state.loading) {
-                                                Text("启动洗衣")
+                                                Text(if (state.isDryer) "启动烘干" else "启动洗衣")
                                             }
                                         }
                                     }

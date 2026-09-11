@@ -75,9 +75,10 @@ fun GradeScreen(
             it.score.toDoubleOrNull() != null && it.credit.toDoubleOrNull() != null && it.gradePoint.toDoubleOrNull() != null
         }
         val totalCredit = scored.sumOf { it.credit.toDouble() }
-        val avgScore = if (scored.isEmpty()) null else
+        // 有成绩记录但总学分为 0 时,sumOf/0.0 会得到 NaN/Infinity,须一并挡掉(显示 "--")
+        val avgScore = if (scored.isEmpty() || totalCredit <= 0.0) null else
             scored.sumOf { it.score.toDouble() * it.credit.toDouble() } / totalCredit
-        val avgJd = if (scored.isEmpty()) null else
+        val avgJd = if (scored.isEmpty() || totalCredit <= 0.0) null else
             scored.sumOf { it.gradePoint.toDouble() * it.credit.toDouble() } / totalCredit
 
         Card(

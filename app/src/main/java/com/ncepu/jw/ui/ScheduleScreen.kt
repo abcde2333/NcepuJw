@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ncepu.jw.data.Course
 import com.ncepu.jw.data.Semester
+import com.ncepu.jw.data.parseWeeks
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -65,23 +66,10 @@ private val CourseColors = listOf(
 private val DAY_LABELS = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 // 预编译正则/格式器:滑动翻页时每页都会用,现场编译是逐帧开销
-private val WEEKS_RE = Regex("""(\d+)\s*(?:[-~—]\s*(\d+))?""")
 private val TIME_RE = Regex("""(\d{1,2}):(\d{2})""")
 private val HH_MM = SimpleDateFormat("HH:mm", Locale.US)
 private val HEADER_DATE_FMT = SimpleDateFormat("yyyy/M/d", Locale.US)
 private val WEEK_DATE_FMT = SimpleDateFormat("M.d", Locale.US)
-
-/** "2-9(周),11(周)" → 周集合;无信息返回 null(全周显示) */
-fun parseWeeks(weeks: String): Set<Int>? {
-    if (weeks.isBlank()) return null
-    val set = mutableSetOf<Int>()
-    WEEKS_RE.findAll(weeks).forEach { m ->
-        val a = m.groupValues[1].toIntOrNull() ?: return@forEach
-        val b = m.groupValues[2].ifEmpty { m.groupValues[1] }.toIntOrNull() ?: a
-        if (a in 1..30) for (x in a..minOf(b, 30)) set.add(x)
-    }
-    return if (set.isEmpty()) null else set
-}
 
 /** 六大节开始时间 → 12 个小节的 (节号, 开始, 结束)
  *  华电作息:每节 45 分钟,大节内两节间课间 10 分钟 */

@@ -201,7 +201,10 @@ class UjingClient {
         )
     }
 
-    /** 下单:POST orders/create(extras = 加购档位,键为接口返回的加购组 key,如 wp_detergentGearId) */
+    /**
+     * 下单:POST orders/create(extras = 加购档位,键为接口返回的加购组 key,如 wp_detergentGearId)。
+     * type:洗衣机=1、烘干机=2(报告 §3.5);dryTime:烘干机分计时收费时传"分钟×10",其余传 0 省略。
+     */
     suspend fun createOrder(
         token: String,
         deviceId: String,
@@ -210,14 +213,17 @@ class UjingClient {
         washModelId: Int,
         temperatureId: Int = 1,
         extras: Map<String, Int> = emptyMap(),
+        type: Int = 1,
+        dryTime: Int = 0,
     ): Result = withContext(Dispatchers.IO) {
         val body = JSONObject()
-            .put("type", 1)
+            .put("type", type)
             .put("deviceTypeId", deviceTypeId)
             .put("deviceId", deviceId)
             .put("deviceWashModelId", washModelId)
             .put("storeId", storeId)
-            .put("washTemperatureId", temperatureId)
+        if (type != 2) body.put("washTemperatureId", temperatureId)  // 温度仅洗衣机
+        if (dryTime > 0) body.put("dryTime", dryTime)
         for ((k, v) in extras) body.put(k, v)
         send("POST", "orders/create", appCode = "BA", bodyJson = body, token = token)
     }

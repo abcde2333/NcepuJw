@@ -527,8 +527,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
         val storeId = info.json?.optString("storeId", knownStoreId) ?: knownStoreId
         washerScanned[deviceId] = Pair(knownTypeId, storeId)
+        val typeName = info.json?.optString("deviceTypeName", "") ?: ""
+        val isDryer = typeName.contains("烘干") || typeName.contains("干衣")
         // 记住这台设备(含下单必需信息),下次免扫码
-        settings.addWasherDevice(deviceId, info.json?.optString("deviceNo", "") ?: "", knownTypeId, storeId, scannedStatus)
+        settings.addWasherDevice(deviceId, info.json?.optString("deviceNo", "") ?: "", knownTypeId, storeId, scannedStatus, isDryer)
         washerState = washerState.copy(savedWashers = settings.washerDevices)
         val models = UjingClient.Parsers.parseModels(info.json)
         val defaultId = UjingClient.Parsers.defaultModelId(models)
@@ -536,8 +538,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         washerState = washerState.copy(
             loading = false,
             scannedDevice = deviceId,
-            deviceSummary = (info.json?.optString("storeName", "") ?: "") + " " +
-                (info.json?.optString("deviceTypeName", "") ?: ""),
+            isDryer = isDryer,
+            dryTimeMinutes = defaultModel?.timeMinutes?.takeIf { it > 0 } ?: 60,
+            deviceSummary = (info.json?.optString("storeName", "") ?: "") + " " + typeName,
             models = models,
             selectedModelId = defaultId,
             // 各选项组默认:必选型(温度/自洁)取首项,加购型不添加
@@ -561,6 +564,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         activeOrderDevices.clear()
         if (washerBusyStatus(status)) activeOrderDevices.add(deviceId)
         settings.updateWasherStatus(deviceId, if (washerBusyStatus(status)) "使用中" else "空闲")
+        washerState = washerState.copy(savedWashers = settings.washerDevices)
+    }
+
+    /** 修改已保存洗衣机/烘干机的备注,并刷新列表 */
+    fun setWasherNote(deviceId: String, note: String) {
+        settings.updateWasherNote(deviceId, note)
         washerState = washerState.copy(savedWashers = settings.washerDevices)
     }
 
@@ -598,10 +607,13 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }.toMap()
         washerState = washerState.copy(loading = true, message = null)
         viewModelScope.launch {
+            val dryer = washerState.isDryer
             val r = ujing.createOrder(
                 washerToken, deviceId, scanned.first, scanned.second, model.id,
                 temperatureId = 1,   // 加热机器由 extras 的 washTemperatureId 覆盖
                 extras = extras,
+                type = if (dryer) 2 else 1,
+                dryTime = if (dryer) washerState.dryTimeMinutes * 10 else 0,  // 报告:分计时=分钟×10
             )
             if (!r.ok) {
                 washerState = washerState.copy(loading = false, message = "下单失败:" + UjingClient.readable(r.code, r.msg))
@@ -635,7 +647,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             val result = withContext(Dispatchers.IO) {
                 com.alipay.sdk.app.PayTask(activity).payV2(orderInfo, true)
             }
-            val sdkPaid = result.contains("resultStatus={9000}")
+            // PayTask 返回串格式随 SDK 版本而变(resultStatus=9000 / {9000} / "9000"),稳健匹配 9000
+            val sdkPaid = Regex("resultStatus[=:\\s{\\\"]+9000").containsMatchIn(result.toString())
             var cur = UjingClient.Parsers.parseOrder(ujing.orderDetail(washerToken, order.orderId).json)
             // 支付结果补查:SDK 回调可能丢失,轮询订单是否已脱离"待支付(10)"(报告 §3.6)
             var tries = 0
@@ -920,7 +933,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         else settings.loadCredentials()
         if (creds != null && !loggedIn) {
             account = creds.first; password = creds.second
-            if (webvpnEnabled) { webvpnLogin(); return }
+            // 校外:开机不主动登录(会弹短信码);仅在真正拉教务数据时由 loadSchedule/Grades/Selection/Exams 惰性触发
+            if (webvpnEnabled) return
             if (settings.credentialType() == "sso") doSsoLogin() else doLogin()
         }
     }
@@ -966,19 +980,29 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 设置:切换校外模式。开启后用统一认证账密建立 WebVPN 隧道并登录教务;关闭则回到直连。 */
+    /**
+     * 设置:切换校外模式。开启只准备好统一认证凭据 + 复位隧道会话标记,**不自动登录**;
+     * 真正要拉教务数据(loadSchedule/loadGrades/loadSelection)时再惰性走 webvpnLogin(按需弹短信码)。
+     */
     fun toggleWebvpn(on: Boolean) {
         webvpnEnabled = on
         settings.webvpnEnabled = on
         client.webvpnEnabled = on
-        if (!on) {
-            client.webvpnReady = false
-            return
+        client.webvpnReady = false
+        if (!on) return
+        val sso = settings.loadSsoCredentials()
+        if (sso != null) {
+            account = sso.first; password = sso.second
+        } else {
+            // 无统一认证凭据:回到登录页(校外仅显示统一认证)由用户输入,避免误用教务密码
+            password = ""; loggedIn = false
         }
-        // 开启:回填统一认证凭据(校外只用它),有则尝试走隧道登录(按需弹短信码)
-        val creds = settings.loadSsoCredentials()
-        if (account.isBlank() && creds != null) { account = creds.first; password = creds.second }
-        if (account.isNotBlank() && password.isNotBlank()) webvpnLogin()
+    }
+
+    /** 校外模式且隧道未就绪:触发惰性登录并让调用方中止本次拉取(webvpnLogin 成功后会自行刷新课表/成绩) */
+    private fun webvpnNeedsRelogin(): Boolean {
+        if (webvpnEnabled && !client.webvpnReady) { webvpnLogin(); return true }
+        return false
     }
 
     /** 切换登录模式时按各自存储回填:有该模式凭据就填入,否则清掉密码(避免教务/统一认证密码互相串用) */
@@ -1002,6 +1026,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 settings.storeCredentials(account.trim(), password, "sso")
                 loadSchedule(force = allCourses.isNotEmpty(), silent = allCourses.isNotEmpty())
                 loadGrades()
+                if (selectionLoaded) loadSelection(force = true)   // 若惰性登录是为选课触发的,登录成功后补拉
+                if (exams.isNotEmpty()) loadExams()
             } else {
                 loginError = err
                 client.webvpnReady = false
@@ -1053,8 +1079,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             }
             return
         }
-        // 校外模式:隧道会话已过期(webvpnReady=false)则先自动重连(按需弹短信码),重连成功后会再刷新
+        // 校外模式且隧道会话未就绪:仅"确实要联网"时才登录。
+        // 非强制刷新(即打开课表)→ 有缓存就直接展示、不为拉数据而自动登录;强制刷新(force)才走隧道登录。
         if (webvpnEnabled && !client.webvpnReady) {
+            if (!force) { fallBackToCache(); return }
             if (!silent) schedLoading = false
             webvpnLogin()
             return
@@ -1279,6 +1307,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 
     fun loadGrades() {
+        if (webvpnNeedsRelogin()) return   // 校外隧道未就绪:先惰性登录,登录后会自动重来
         gradeLoading = true
         gradeError = null
         viewModelScope.launch {
@@ -1304,6 +1333,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
      */
     fun loadSelection(force: Boolean = false) {
         if (selLoading) return
+        if (webvpnNeedsRelogin()) return   // 校外隧道未就绪:先惰性登录,登录后自动重来
         val fresh = System.currentTimeMillis() - selCacheTime < SEL_STALE_MS
         if (selectionLoaded && fresh && !force) return
         val silent = selectionLoaded || xkRounds.isNotEmpty()
@@ -1314,7 +1344,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val rounds = client.fetchXkRounds()
-                val selected = client.fetchSelectedCourses(gradeSem)
+                // 选课结果针对当前学期,用课表学期 schedSem(默认 Semester.current()),不受成绩页切学期影响
+                val selected = client.fetchSelectedCourses(schedSem)
                 xkRounds = rounds
                 selectedCourses = selected
                 selectionLoaded = true
@@ -1345,6 +1376,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 
     fun loadExams() {
+        if (webvpnNeedsRelogin()) return   // 校外隧道未就绪:先惰性登录,登录后自动重来
         examLoading = true
         examError = null
         viewModelScope.launch {
@@ -1643,6 +1675,8 @@ class MainActivity : ComponentActivity() {
                             onAutoStartChange = { vm.washerState = vm.washerState.copy(autoStartAfterPay = it) },
                             onRefreshOrder = { vm.washerRefresh() },
                             onStartWash = { vm.washerStart() },
+                            onDryTimeChange = { vm.washerState = vm.washerState.copy(dryTimeMinutes = it) },
+                            onSetWasherNote = { did, note -> vm.setWasherNote(did, note) },
                             onBack = { navController.popBackStack() },
                         )
                     }
@@ -1828,7 +1862,8 @@ class MainActivity : ComponentActivity() {
         if (!vm.smsPrompt) return
         var code by androidx.compose.runtime.remember { mutableStateOf("") }
         AlertDialog(
-            onDismissRequest = { vm.cancelSms() },
+            // 防呆:点外部/返回不关闭(避免手滑作废已发的验证码),只能"登录"或"取消"
+            onDismissRequest = { },
             title = { Text("短信验证") },
             text = {
                 androidx.compose.foundation.layout.Column {
@@ -1836,18 +1871,22 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
                         value = code,
-                        onValueChange = { code = it.filter { c -> c.isDigit() }.take(8) },
-                        label = { Text("短信验证码") },
+                        onValueChange = { v -> code = v.filter { it.isDigit() }.take(6) },
+                        label = { Text("短信验证码(6 位)") },
                         singleLine = true,
+                        isError = code.isNotEmpty() && code.length < 6,
+                        supportingText = {
+                            if (code.length < 6) Text("请输入完整的 6 位验证码")
+                        },
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                             keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
                     )
                 }
             },
             confirmButton = {
-                Button(onClick = { vm.submitSms(code) }, enabled = code.isNotBlank()) { Text("登录") }
+                Button(onClick = { vm.submitSms(code) }, enabled = code.length == 6) { Text("登录") }
             },
-            dismissButton = { TextButton(onClick = { vm.cancelSms() }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { vm.cancelSms() }) { Text("取消并重新登录") } },
         )
     }
 

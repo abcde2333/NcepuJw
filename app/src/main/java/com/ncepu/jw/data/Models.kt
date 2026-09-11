@@ -3,6 +3,22 @@ package com.ncepu.jw.data
 import androidx.compose.runtime.Immutable
 
 /**
+ * "2-9(周),11(周),13-15" → 周集合;无信息/空返回 null(视为全周有效)。
+ * 供课表页与上课提醒调度共用(data 层,避免 UI 依赖)。
+ */
+private val WEEKS_RE = Regex("""(\d+)\s*(?:[-~—]\s*(\d+))?""")
+fun parseWeeks(weeks: String): Set<Int>? {
+    if (weeks.isBlank()) return null
+    val set = mutableSetOf<Int>()
+    WEEKS_RE.findAll(weeks).forEach { m ->
+        val a = m.groupValues[1].toIntOrNull() ?: return@forEach
+        val b = m.groupValues[2].ifEmpty { m.groupValues[1] }.toIntOrNull() ?: a
+        if (a in 1..30) for (x in a..minOf(b, 30)) set.add(x)
+    }
+    return if (set.isEmpty()) null else set
+}
+
+/**
  * 数据模型(华电教务系统 = 强智老版 jsxsd 部署)
  * UI 层大量持有这些类型:@Immutable 让 Compose 把它们视为稳定类型,
  * 状态变化时未变的课程卡片/列表项可以跳过重组(否则 List<Course> 永远不稳定,

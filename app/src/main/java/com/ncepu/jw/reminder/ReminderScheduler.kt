@@ -7,6 +7,7 @@ import android.content.Intent
 import android.os.Build
 import com.ncepu.jw.data.Course
 import com.ncepu.jw.data.SettingsStore
+import com.ncepu.jw.data.parseWeeks
 import java.util.Calendar
 
 /**
@@ -66,11 +67,15 @@ object ReminderScheduler {
             val dow = calendarDayOfWeekToCourseDay(day.get(Calendar.DAY_OF_WEEK))
             val dayId = day.get(Calendar.YEAR) * 10000 +
                 (day.get(Calendar.MONTH) + 1) * 100 + day.get(Calendar.DAY_OF_MONTH)
+            // 该目标日期对应的教学周次(按 weekStartMillis 计算),用于按周次过滤课程
+            val week = SettingsStore.currentWeek(day.timeInMillis, store.weekStartMillis).coerceIn(1, 30)
 
-            // 该天每个大节的第一门课(11-12 节及以后不排提醒)
+            // 该天每个大节的第一门"本周有课"的课(11-12 节及以后不排提醒)
             val byRow = LinkedHashMap<Int, Course>()
             for (c in courses) {
                 if (c.day != dow) continue
+                val ws = parseWeeks(c.weeks)          // null = 无周次信息,视为全周有效
+                if (ws != null && week !in ws) continue
                 val row = SettingsStore.sectionRowIndex(c.sections.first)
                 if (row < 0 || row >= times.size) continue
                 if (!byRow.containsKey(row)) byRow[row] = c

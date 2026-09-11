@@ -12,6 +12,8 @@ data class SavedWasher(
     val deviceTypeId: Int = 0,
     val storeId: String = "",
     val status: String = "",
+    val note: String = "",          // 用户自定义备注(如"三教2楼")
+    val dryer: Boolean = false,     // 烘干机(true)还是洗衣机(false)
 )
 
 /** 主题模式 */
@@ -273,6 +275,8 @@ class SettingsStore(context: Context) {
                         deviceTypeId = o.optInt("deviceTypeId", 0),
                         storeId = o.optString("storeId", ""),
                         status = o.optString("status", ""),
+                        note = o.optString("note", ""),
+                        dryer = o.optBoolean("dryer", false),
                     )
                 }
             }.getOrDefault(emptyList())
@@ -287,22 +291,35 @@ class SettingsStore(context: Context) {
                         .put("deviceTypeId", w.deviceTypeId)
                         .put("storeId", w.storeId)
                         .put("status", w.status)
+                        .put("note", w.note)
+                        .put("dryer", w.dryer)
                 )
             }
             prefs.edit().putString(KEY_WASHER_DEVICES, arr.toString()).apply()
         }
 
-    fun addWasherDevice(did: String, name: String, deviceTypeId: Int = 0, storeId: String = "", status: String = "") {
+    fun addWasherDevice(
+        did: String, name: String, deviceTypeId: Int = 0, storeId: String = "",
+        status: String = "", dryer: Boolean = false,
+    ) {
         val list = washerDevices.toMutableList()
         val idx = list.indexOfFirst { it.did == did }
+        val prev = list.getOrNull(idx)
         val merged = SavedWasher(
-            did = did, name = name.ifBlank { list.getOrNull(idx)?.name ?: "" },
-            deviceTypeId = if (deviceTypeId > 0) deviceTypeId else (list.getOrNull(idx)?.deviceTypeId ?: 0),
-            storeId = storeId.ifBlank { list.getOrNull(idx)?.storeId ?: "" },
-            status = status.ifBlank { list.getOrNull(idx)?.status ?: "" },
+            did = did, name = name.ifBlank { prev?.name ?: "" },
+            deviceTypeId = if (deviceTypeId > 0) deviceTypeId else (prev?.deviceTypeId ?: 0),
+            storeId = storeId.ifBlank { prev?.storeId ?: "" },
+            status = status.ifBlank { prev?.status ?: "" },
+            note = prev?.note ?: "",                 // 备注持久保留,不被重扫清掉
+            dryer = dryer || (prev?.dryer ?: false),
         )
         if (idx >= 0) list[idx] = merged else list.add(merged)  // 就地更新,不改变顺序
         washerDevices = list
+    }
+
+    /** 修改某台设备的备注 */
+    fun updateWasherNote(did: String, note: String) {
+        washerDevices = washerDevices.map { if (it.did == did) it.copy(note = note.trim()) else it }
     }
 
     fun updateWasherStatus(did: String, status: String) {
