@@ -467,17 +467,21 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     washerState = washerState.copy(loading = false, message = "未识别到设备编号,请确认扫的是洗衣机机身码")
                     return@launch
                 }
+                // 扫码即可得知占用状态;存规范徽标(空闲/使用中/故障/离线),修"工作中的机器被标成空闲"
+                val badge = UjingClient.scanBadge(enabled, status, reason)
+                val deviceTypeId = result.optInt("deviceTypeId", 0)
                 if (!enabled) {
+                    // 仍把该机器按真实状态记入"我的设备"(存原始二维码供重扫),不进入下单流程
+                    settings.addWasherDevice(deviceId, "", deviceTypeId, "", badge, qr = content)
                     washerState = washerState.copy(
                         loading = false,
-                        message = "该设备暂不可下单" + (if (reason.isNotBlank()) ":$reason" else "") +
+                        savedWashers = settings.washerDevices,
+                        message = "该设备" + badge + "暂不可下单" + (if (reason.isNotBlank()) ":$reason" else "") +
                             (if (status.isNotBlank()) "(状态 $status)" else ""),
                     )
                     return@launch
                 }
-                // 下单必需的 deviceTypeId 来自扫码结果(非套餐接口)
-                val deviceTypeId = result.optInt("deviceTypeId", 0)
-                val err = loadWasherProgram(deviceId, deviceTypeId, "", status)
+                val err = loadWasherProgram(deviceId, deviceTypeId, "", badge, scannedQr = content)
                 if (err != null) {
                     washerState = washerState.copy(loading = false, message = err)
                 }
@@ -520,6 +524,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         knownTypeId: Int,
         knownStoreId: String,
         scannedStatus: String = "",
+        scannedQr: String = "",
     ): String? {
         val info = ujing.programInfo(washerToken, deviceId)
         if (!info.ok) {
@@ -530,7 +535,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         val typeName = info.json?.optString("deviceTypeName", "") ?: ""
         val isDryer = typeName.contains("烘干") || typeName.contains("干衣")
         // 记住这台设备(含下单必需信息),下次免扫码
-        settings.addWasherDevice(deviceId, info.json?.optString("deviceNo", "") ?: "", knownTypeId, storeId, scannedStatus, isDryer)
+        settings.addWasherDevice(deviceId, info.json?.optString("deviceNo", "") ?: "", knownTypeId, storeId, scannedStatus, isDryer, scannedQr)
         washerState = washerState.copy(savedWashers = settings.washerDevices)
         val models = UjingClient.Parsers.parseModels(info.json)
         val defaultId = UjingClient.Parsers.defaultModelId(models)
@@ -710,7 +715,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         val no = UjingClient.Parsers.parseOrder(d.json)
         applyWasherOrder(no)
         updateActiveOrder(washerState.scannedDevice ?: "", no.status)
-        washerState = washerState.copy(currentOrder = no)
+        if (isWasherTerminal(no)) {
+            // 订单完成/取消 → 自动收起订单卡片(完成通知由前台服务发)
+            washerState = washerState.copy(currentOrder = null, message = "订单已结束(${no.statusText.ifBlank { "完成" }}),已自动收起")
+        } else {
+            washerState = washerState.copy(currentOrder = no)
+        }
     }
 
     private fun ensureWasherPoller() {
@@ -735,8 +745,13 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             val d = ujing.orderDetail(washerToken, order.orderId)
             val no = UjingClient.Parsers.parseOrder(d.json)
             applyWasherOrder(no)
-            washerState = washerState.copy(loading = false, currentOrder = no)
-            ensureWasherPoller()
+            updateActiveOrder(washerState.scannedDevice ?: "", no.status)
+            if (isWasherTerminal(no)) {
+                washerState = washerState.copy(loading = false, currentOrder = null, message = "订单已结束(${no.statusText.ifBlank { "完成" }}),已自动收起")
+            } else {
+                washerState = washerState.copy(loading = false, currentOrder = no)
+                ensureWasherPoller()
+            }
         }
     }
 
@@ -754,15 +769,48 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     fun refreshWasherSaved() {
         // 恢复已保存的登录态(重启后免登录)
         if (washerToken.isBlank()) washerToken = settings.washerToken
-        // 自愈:清掉旧版本残留的门店级"空闲 X/共 Y"等脏状态,只保留 使用中/空闲
+        // 自愈:把旧版本残留的门店级"空闲 X/共 Y"等脏状态归一到"空闲"(保留 空闲/使用中/故障/离线)
+        val validStatus = setOf("使用中", "空闲", "故障", "离线", "忙碌")
         settings.washerDevices.forEach { w ->
-            if (w.status != "使用中" && w.status != "空闲") settings.updateWasherStatus(w.did, "空闲")
+            if (w.status !in validStatus) settings.updateWasherStatus(w.did, "空闲")
         }
         washerState = washerState.copy(
             loggedIn = washerToken.isNotBlank(),
             savedWashers = settings.washerDevices,
         )
         washerResumeRunning()
+        refreshWasherOccupancy()
+    }
+
+    private var washerStatusJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * 利用扫码接口做状态监测:对每台已保存设备,用其设备号当 qrCode 再调 `scanWasherCode`,
+     * 按返回的 createOrderEnabled/status 刷新 空闲/使用中/故障/离线 徽标(进洗衣页时一次,串行带小间隔)。
+     * 设备号不能经此接口查状态时(scanWasherCode 无 createOrderEnabled)保留原状态,不误改。
+     */
+    private fun refreshWasherOccupancy() {
+        if (washerToken.isBlank()) return
+        val saved = settings.washerDevices
+        if (saved.isEmpty()) return
+        if (washerStatusJob?.isActive == true) return
+        washerStatusJob = viewModelScope.launch {
+            var changed = false
+            for (w in saved) {
+                // scanWasherCode 需二维码原始内容:优先用存下的原始 qr,退回设备号
+                val qr = w.qr.ifBlank { w.name }
+                if (qr.isBlank()) continue
+                val badge = runCatching {
+                    val r = ujing.scanWasher(washerToken, qr)
+                    UjingClient.scanStatusFromResult(r.json?.optJSONObject("result"))
+                }.getOrNull()
+                if (badge != null && badge != w.status) {
+                    settings.updateWasherStatus(w.did, badge); changed = true
+                }
+                kotlinx.coroutines.delay(250)   // 轻节流,避免对生产高频
+            }
+            if (changed) washerState = washerState.copy(savedWashers = settings.washerDevices)
+        }
     }
 
     /** 进入洗衣页:拉一次进行中订单,恢复"正在跑"的订单详情/启动按钮(报告 §3.3) */

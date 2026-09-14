@@ -274,14 +274,21 @@ fun WasherScreen(
                                                         color = MaterialTheme.colorScheme.outline,
                                                     )
                                                     Spacer(Modifier.width(8.dp))
-                                                    // 占用徽标:只反映自己在这台上的进行中单(使用中),否则空闲
-                                                    val busy = saved.status == "使用中" || saved.status == "忙碌"
+                                                    // 占用徽标:空闲/使用中/故障/离线(扫码时或自己下单时更新),未知归"空闲"
+                                                    val st = when (saved.status) {
+                                                        "使用中", "忙碌", "故障", "离线" -> saved.status
+                                                        else -> "空闲"
+                                                    }
+                                                    val stColor = when (st) {
+                                                        "使用中", "忙碌", "故障" -> MaterialTheme.colorScheme.error
+                                                        "离线" -> MaterialTheme.colorScheme.tertiary
+                                                        else -> MaterialTheme.colorScheme.primary
+                                                    }
                                                     Text(
-                                                        if (busy) "使用中" else "空闲",
+                                                        st,
                                                         fontSize = 11.sp,
                                                         fontWeight = FontWeight.Medium,
-                                                        color = if (busy) MaterialTheme.colorScheme.error
-                                                        else MaterialTheme.colorScheme.primary,
+                                                        color = stColor,
                                                     )
                                                 }
                                             }

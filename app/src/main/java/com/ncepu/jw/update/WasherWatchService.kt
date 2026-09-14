@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.ncepu.jw.R
 import com.ncepu.jw.data.SettingsStore
@@ -36,6 +37,7 @@ class WasherWatchService : Service() {
 
         fun start(ctx: Context, orderId: String) {
             if (orderId.isBlank()) return
+            SettingsStore(ctx).watchOrderId = orderId   // 供进程回收后 START_STICKY 恢复
             val i = Intent(ctx, WasherWatchService::class.java).apply {
                 action = ACTION_WATCH
                 putExtra(EXTRA_ORDER, orderId)
@@ -44,8 +46,15 @@ class WasherWatchService : Service() {
         }
 
         fun stop(ctx: Context) {
+            SettingsStore(ctx).watchOrderId = ""
             ctx.stopService(Intent(ctx, WasherWatchService::class.java))
         }
+    }
+
+    private val wakeLock: PowerManager.WakeLock by lazy {
+        (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NcepuJw:WasherWatch")
+            .apply { setReferenceCounted(false) }
     }
 
     private val client = UjingClient()
@@ -59,9 +68,13 @@ class WasherWatchService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         ensureChannels()
         startForeground(FG_ID, ongoingNotif("洗衣监控中"))
-        val token = SettingsStore(this).washerToken
-        val orderId = intent?.getStringExtra(EXTRA_ORDER).orEmpty()
+        val store = SettingsStore(this)
+        val token = store.washerToken
+        // 正常启动带 EXTRA_ORDER;进程被回收后 START_STICKY 重启时 intent 为 null → 从持久化恢复
+        val orderId = intent?.getStringExtra(EXTRA_ORDER).takeUnless { it.isNullOrBlank() }
+            ?: store.watchOrderId
         if (token.isBlank() || orderId.isBlank()) { stopSelf(); return START_NOT_STICKY }
+        store.watchOrderId = orderId
         watch(token, orderId)
         return START_STICKY
     }
@@ -80,18 +93,25 @@ class WasherWatchService : Service() {
         watchJob = scope.launch {
             var miss = 0
             while (isActive) {
-                val r = runCatching { client.orderDetail(token, orderId) }.getOrNull()
-                val o = UjingClient.Parsers.parseOrder(r?.json)
-                if (o.orderId.isBlank()) {
-                    if (++miss >= 4) break
-                } else {
-                    miss = 0
-                    onStatus(orderId, o.status, o.selfCleanEnable)
-                    updateOngoing(statusLabel(o))
-                    if (o.status in setOf("50", "60")) break
+                // 灭屏/Doze 下短暂持锁,确保这次网络轮询 + 通知刷新能落地(而非被挂起)
+                runCatching { if (!wakeLock.isHeld) wakeLock.acquire(10_000L) }
+                try {
+                    val r = runCatching { client.orderDetail(token, orderId) }.getOrNull()
+                    val o = UjingClient.Parsers.parseOrder(r?.json)
+                    if (o.orderId.isBlank()) {
+                        if (++miss >= 4) break
+                    } else {
+                        miss = 0
+                        onStatus(orderId, o.status, o.selfCleanEnable)
+                        updateOngoing(statusLabel(o))
+                        if (o.status in setOf("50", "60")) break
+                    }
+                } finally {
+                    runCatching { if (wakeLock.isHeld) wakeLock.release() }
                 }
                 delay(20_000)
             }
+            SettingsStore(this@WasherWatchService).watchOrderId = ""
             stopSelf()
         }
     }
@@ -158,6 +178,7 @@ class WasherWatchService : Service() {
     }
 
     override fun onDestroy() {
+        runCatching { if (wakeLock.isHeld) wakeLock.release() }
         scope.cancel()
         super.onDestroy()
     }

@@ -63,6 +63,32 @@ class UjingClient {
         /** 「启动洗衣」按钮可点的状态:待启动20 / 自洁启动中22 / 自洁完成35(报告:仅这三个) */
         fun canStartWash(status: String): Boolean = status in setOf("20", "22", "35")
 
+        /**
+         * 扫码结果 → 设备占用徽标。基于 `scanWasherCode` 的 createOrderEnabled 与 status
+         * (SCAN_ERROR 枚举:1=运行中/被他人占用、2=故障、8=离线)。存进 SavedWasher.status,
+         * 供"我的设备"卡片显示,修"扫到工作中的机器却标成空闲"。
+         */
+        fun scanBadge(enabled: Boolean, status: String, reason: String): String = when {
+            enabled -> "空闲"
+            status == "8" || reason.contains("离线") -> "离线"
+            status == "2" || reason.contains("故障") -> "故障"
+            else -> "使用中"
+        }
+
+        /**
+         * 从 `scanWasherCode` 的 data.result 解析占用徽标;无 result 或不含 createOrderEnabled 时返回 null
+         * (表示该设备号无法经扫码接口查状态,调用方应保留原状态)。
+         */
+        fun scanStatusFromResult(resultJson: JSONObject?): String? {
+            val r = resultJson ?: return null
+            if (!r.has("createOrderEnabled")) return null
+            return scanBadge(
+                r.optBoolean("createOrderEnabled", false),
+                r.optString("status", ""),
+                r.optString("reason", ""),
+            )
+        }
+
         /** 分 → "1.50" */
         fun fen2yuan(fen: Int): String {
             val neg = fen < 0

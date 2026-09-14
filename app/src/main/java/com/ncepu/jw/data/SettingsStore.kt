@@ -14,6 +14,7 @@ data class SavedWasher(
     val status: String = "",
     val note: String = "",          // 用户自定义备注(如"三教2楼")
     val dryer: Boolean = false,     // 烘干机(true)还是洗衣机(false)
+    val qr: String = "",            // 添加时的原始二维码内容(状态监测重扫用,scanWasherCode 需原文)
 )
 
 /** 主题模式 */
@@ -261,6 +262,11 @@ class SettingsStore(context: Context) {
         get() = prefs.getString(KEY_WASHER_TOKEN, null) ?: ""
         set(v) = prefs.edit().putString(KEY_WASHER_TOKEN, v).apply()
 
+    /** 正在被前台服务监控的洗衣订单号(进程被回收后 START_STICKY 重启可据此恢复轮询) */
+    var watchOrderId: String
+        get() = prefs.getString("watch_order_id", null) ?: ""
+        set(v) = prefs.edit().putString("watch_order_id", v).apply()
+
     /** 扫过码的洗衣机(did → deviceNo) */
     var washerDevices: List<SavedWasher>
         get() {
@@ -277,6 +283,7 @@ class SettingsStore(context: Context) {
                         status = o.optString("status", ""),
                         note = o.optString("note", ""),
                         dryer = o.optBoolean("dryer", false),
+                        qr = o.optString("qr", ""),
                     )
                 }
             }.getOrDefault(emptyList())
@@ -293,6 +300,7 @@ class SettingsStore(context: Context) {
                         .put("status", w.status)
                         .put("note", w.note)
                         .put("dryer", w.dryer)
+                        .put("qr", w.qr)
                 )
             }
             prefs.edit().putString(KEY_WASHER_DEVICES, arr.toString()).apply()
@@ -300,7 +308,7 @@ class SettingsStore(context: Context) {
 
     fun addWasherDevice(
         did: String, name: String, deviceTypeId: Int = 0, storeId: String = "",
-        status: String = "", dryer: Boolean = false,
+        status: String = "", dryer: Boolean = false, qr: String = "",
     ) {
         val list = washerDevices.toMutableList()
         val idx = list.indexOfFirst { it.did == did }
@@ -312,6 +320,7 @@ class SettingsStore(context: Context) {
             status = status.ifBlank { prev?.status ?: "" },
             note = prev?.note ?: "",                 // 备注持久保留,不被重扫清掉
             dryer = dryer || (prev?.dryer ?: false),
+            qr = qr.ifBlank { prev?.qr ?: "" },      // 原始二维码持久保留
         )
         if (idx >= 0) list[idx] = merged else list.add(merged)  // 就地更新,不改变顺序
         washerDevices = list
