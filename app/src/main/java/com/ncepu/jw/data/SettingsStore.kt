@@ -65,6 +65,9 @@ class SettingsStore(context: Context) {
         const val KEY_SCHED_SOURCE = "schedule_source" // AUTO=联网 / MANUAL=手动导入
         const val KEY_UPDATE_CHECK = "update_last_check"
         const val KEY_UPDATE_SNOOZE = "update_snooze_code" // 已"以后再说"的版本
+        const val KEY_HOLIDAY_DATES = "holiday_dates"      // 法定假日 ISO 日期串 JSON 数组
+        const val KEY_HOLIDAY_SYNC_AT = "holiday_sync_at"  // 上次成功同步时间戳
+        const val KEY_HOLIDAY_YEAR = "holiday_year"        // 缓存所属年份
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
         private const val KEY_SSO_ACCOUNT = "sso_account"
@@ -163,6 +166,39 @@ class SettingsStore(context: Context) {
     var webvpnEnabled: Boolean
         get() = prefs.getBoolean(KEY_WEBVPN, false)
         set(v) = prefs.edit().putBoolean(KEY_WEBVPN, v).apply()
+
+    /** 桌面小部件样式:"dark" / "light" / "translucent"(半透明,系统支持时毛玻璃) */
+    var widgetStyle: String
+        get() = prefs.getString("widget_style", "dark") ?: "dark"
+        set(v) = prefs.edit().putString("widget_style", v).apply()
+
+    /** 法定节假日日期集合(ISO yyyy-MM-dd),供提醒/小部件跳过假日 */
+    var skippedDates: Set<String>
+        get() {
+            val raw = prefs.getString(KEY_HOLIDAY_DATES, null) ?: return emptySet()
+            return runCatching {
+                val arr = JSONArray(raw)
+                (0 until arr.length()).map { arr.getString(it) }.toSet()
+            }.getOrDefault(emptySet())
+        }
+        set(v) {
+            val arr = JSONArray()
+            v.forEach { arr.put(it) }
+            prefs.edit().putString(KEY_HOLIDAY_DATES, arr.toString()).apply()
+        }
+
+    /** 上次成功同步节假日的时间戳(节流/过期判定) */
+    var holidaySyncAtMillis: Long
+        get() = prefs.getLong(KEY_HOLIDAY_SYNC_AT, 0L)
+        set(v) = prefs.edit().putLong(KEY_HOLIDAY_SYNC_AT, v).apply()
+
+    /** 节假日缓存所属年份(跨年自动失效重拉) */
+    var holidayYear: Int
+        get() = prefs.getInt(KEY_HOLIDAY_YEAR, 0)
+        set(v) = prefs.edit().putInt(KEY_HOLIDAY_YEAR, v).apply()
+
+    /** 给定 ISO 日期(yyyy-MM-dd)是否法定假日 */
+    fun isHoliday(dateIso: String): Boolean = dateIso in skippedDates
 
     var leadMinutes: Int
         get() = prefs.getInt(KEY_LEAD, 10)

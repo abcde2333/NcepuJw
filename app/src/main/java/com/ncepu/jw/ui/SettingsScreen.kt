@@ -58,6 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -68,6 +69,21 @@ import com.ncepu.jw.data.NavMaterial
 import com.ncepu.jw.data.SettingsStore
 import com.ncepu.jw.data.ThemeMode
 import com.ncepu.jw.reminder.ReminderScheduler
+import android.Manifest
+import android.content.Context
+import android.content.ComponentName
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
+import android.widget.Toast
+import androidx.core.content.ContextCompat
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.ncepu.jw.ui.theme.ThemePresets
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -96,6 +112,8 @@ fun SettingsScreen(
     onUseImportedChange: (Boolean) -> Unit = {},
     webvpnEnabled: Boolean = false,
     onWebvpnChange: (Boolean) -> Unit = {},
+    widgetStyle: String = "dark",
+    onWidgetStyleChange: (String) -> Unit = {},
     update: com.ncepu.jw.update.Updater.State = com.ncepu.jw.update.Updater.State.Idle,
     currentVersion: String = "",
     onCheckUpdate: () -> Unit = {},
@@ -204,6 +222,28 @@ fun SettingsScreen(
                     checked = dynamicColor,
                     onCheckedChange = { onDynamicColorChange(it) },
                 )
+            },
+        )
+
+        ListItem(
+            headlineContent = { Text("小部件样式") },
+            supportingContent = {
+                Column(Modifier.padding(top = 8.dp)) {
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        listOf("dark" to "深色", "light" to "浅色", "translucent" to "半透明")
+                            .forEachIndexed { i, (key, label) ->
+                                SegmentedButton(
+                                    selected = widgetStyle == key,
+                                    onClick = { onWidgetStyleChange(key) },
+                                    shape = SegmentedButtonDefaults.itemShape(i, 3),
+                                ) { Text(label) }
+                            }
+                    }
+                    Text(
+                        "桌面「今日课表」小部件背景;半透明在 Android 12+ 且启动器支持时呈毛玻璃",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             },
         )
 
@@ -401,6 +441,7 @@ fun SettingsScreen(
             supportingContent = { Text(sectionTimes.joinToString(" / ")) },
             trailingContent = { TextButton(onClick = { showTimeDialog = true }) { Text("修改") } },
         )
+        if (reminderEnabled || examReminderEnabled) ReminderReliabilityCard()
         HorizontalDivider(Modifier.padding(horizontal = 16.dp))
 
         // ---------- 更新 ----------
@@ -594,3 +635,126 @@ private fun TimeEditDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
+
+/**
+ * 提醒可靠性引导卡:通知权限 / 精确闹钟 / 忽略电池优化 / 自启动。
+ * 国产 ROM(MIUI 等)会冻结后台进程,这几项是"提醒不响/不准"的根因。
+ * 每项一键跳转对应系统设置页,找不到时兜底到应用详情页并提示手动允许;
+ * 状态在每次 ON_RESUME 复检(从系统设置返回即刷新)。
+ */
+@Composable
+private fun ReminderReliabilityCard() {
+    val ctx = LocalContext.current
+    val tick = rememberResumeTick()
+
+    val notifGranted = tick.let {
+        Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+    val exactGranted = tick.let {
+        Build.VERSION.SDK_INT < 31 ||
+            (ctx.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager).canScheduleExactAlarms()
+    }
+    val batteryOk = tick.let {
+        val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+        pm.isIgnoringBatteryOptimizations(ctx.packageName)
+    }
+
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+        Text(
+            "为保证提醒准时,建议开启以下系统权限(国产 ROM 会冻结后台)",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(4.dp))
+
+        PermissionRow(
+            title = "通知权限",
+            ok = notifGranted,
+            onClick = {
+                tryStart(ctx, Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName))
+                    || openAppDetails(ctx)
+            },
+        )
+        if (Build.VERSION.SDK_INT >= 31) PermissionRow(
+            title = "精确闹钟",
+            ok = exactGranted,
+            onClick = {
+                tryStart(ctx, Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                    .setData(Uri.parse("package:${ctx.packageName}")))
+                    || openAppDetails(ctx)
+            },
+        )
+        PermissionRow(
+            title = "忽略电池优化",
+            ok = batteryOk,
+            onClick = {
+                if (!tryStart(ctx, Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(Uri.parse("package:${ctx.packageName}")))
+                ) openAppDetails(ctx)
+            },
+        )
+        PermissionRow(
+            title = "自启动管理",
+            ok = false,
+            okText = "去设置",
+            onClick = {
+                val miui = Intent().setComponent(
+                    ComponentName(
+                        "com.miui.securitycenter",
+                        "com.miui.permcenter.autostart.AutoStartManagementActivity",
+                    ),
+                )
+                if (!tryStart(ctx, miui)) {
+                    openAppDetails(ctx)
+                    Toast.makeText(ctx, "请在应用信息中手动允许自启动/后台运行", Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun PermissionRow(title: String, ok: Boolean, okText: String = "", onClick: () -> Unit) {
+    ListItem(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.medium)
+            .clickable(onClick = onClick),
+        headlineContent = { Text(title) },
+        trailingContent = {
+            Text(
+                if (ok) "已开启" else okText.ifBlank { "去开启" },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+            )
+        },
+    )
+}
+
+/** 每次页面 ON_RESUME 自增一次,驱动权限状态复检(从系统设置返回即刷新)。 */
+@Composable
+private fun rememberResumeTick(): Int {
+    val owner = LocalLifecycleOwner.current
+    var tick by remember { mutableStateOf(0) }
+    DisposableEffect(owner) {
+        val obs = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_RESUME) tick++ }
+        owner.lifecycle.addObserver(obs)
+        onDispose { owner.lifecycle.removeObserver(obs) }
+    }
+    return tick
+}
+
+/** 依次尝试启动 intent(自动加 NEW_TASK),全部失败返回 false。 */
+private fun tryStart(ctx: Context, vararg intents: Intent): Boolean {
+    for (i in intents) {
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (runCatching { ctx.startActivity(i) }.isSuccess) return true
+    }
+    return false
+}
+
+private fun openAppDetails(ctx: Context): Boolean =
+    tryStart(ctx, Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}")))

@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">华电教务</string>
+    <string name="widget_name">今日课表</string>
+    <string name="widget_desc">显示今天/明天的课与当前教学周</string>
 </resources>

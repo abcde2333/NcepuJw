@@ -69,6 +69,11 @@ object ReminderScheduler {
                 (day.get(Calendar.MONTH) + 1) * 100 + day.get(Calendar.DAY_OF_MONTH)
             // 该目标日期对应的教学周次(按 weekStartMillis 计算),用于按周次过滤课程
             val week = SettingsStore.currentWeek(day.timeInMillis, store.weekStartMillis).coerceIn(1, 30)
+            // 法定节假日整天跳过:放假当天不排任何上课提醒
+            val dateIso = "%04d-%02d-%02d".format(
+                day.get(Calendar.YEAR), day.get(Calendar.MONTH) + 1, day.get(Calendar.DAY_OF_MONTH),
+            )
+            if (store.isHoliday(dateIso)) continue
 
             // 该天每个大节的第一门"本周有课"的课(11-12 节及以后不排提醒)
             val byRow = LinkedHashMap<Int, Course>()
@@ -124,14 +129,16 @@ object ReminderScheduler {
         exam: com.ncepu.jw.data.Exam,
         idx: Int,
     ) {
+        val requestCode = EXAM_REQUEST_BASE + (idx % EXAM_REQUEST_RANGE)
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             putExtra("exam", true)
             putExtra("name", exam.name)
             putExtra("room", exam.room)
             putExtra("seat", exam.seat)
             putExtra("start", exam.startMillis)
+            putExtra("notif_id", requestCode)
+            putExtra("group", "exam")
         }
-        val requestCode = EXAM_REQUEST_BASE + (idx % EXAM_REQUEST_RANGE)
         val pi = PendingIntent.getBroadcast(
             context, requestCode, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
@@ -176,6 +183,8 @@ object ReminderScheduler {
             putExtra("teacher", course.teacher)
             putExtra("row", row)
             putExtra("start", startTime)
+            putExtra("notif_id", requestCode)
+            putExtra("group", "class_${requestCode / 16}")
         }
         val pi = PendingIntent.getBroadcast(
             context, requestCode, intent,

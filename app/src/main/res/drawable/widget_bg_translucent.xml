@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 半透明背景:Android 12+ 且启动器支持时由系统对背后内容做毛玻璃;不支持时即半透明磨砂观感 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#A6000000" />
+    <corners android:radius="20dp" />
+</shape>

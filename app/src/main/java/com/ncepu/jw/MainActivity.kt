@@ -15,6 +15,7 @@ import androidx.activity.ComponentActivity
 import androidx.core.view.WindowCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -149,6 +150,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     // 校外模式(WebVPN)
     var webvpnEnabled by mutableStateOf(settings.webvpnEnabled)
+    var widgetStyle by mutableStateOf(settings.widgetStyle)
+    // 小部件深链:非空时 MainScaffold 据此切到对应 tab(1=饮水),消费后置空
+    var pendingTab by mutableStateOf<Int?>(null)
     // 短信验证码输入(校外登录 与 校内统一认证 MFA 共用)
     var smsPrompt by mutableStateOf(false)
     private var smsDeferred: kotlinx.coroutines.CompletableDeferred<String>? = null
@@ -1168,6 +1172,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 schedLoaded = true
                 name = client.studentName ?: name
                 settings.cacheCourses(full)
+                com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(getApplication())
+                refreshHolidays()
                 // 手动刷新/切学期重新联网后,恢复自动数据源(覆盖手动导入的固定数据)
                 if (force) settings.scheduleSource = "AUTO"
                 // 官方当前周:周四锚定(与三请求并发);拿不到则本地推断
@@ -1197,6 +1203,35 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             } finally {
                 schedLoading = false
             }
+        }
+    }
+
+    /**
+     * 同步法定节假日:拉取当年(11-12 月一并拉次年)放假日期存入本地,
+     * 之后上课提醒/小部件据此跳过假期。失败保持原数据(fail-open,绝不因此屏蔽提醒)。
+     * force=false 时 7 天内且同年不重复拉取。
+     */
+    fun refreshHolidays(force: Boolean = false) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val store = settings
+            val now = System.currentTimeMillis()
+            val cal = java.util.Calendar.getInstance()
+            val year = cal.get(java.util.Calendar.YEAR)
+            val stale = force ||
+                (now - store.holidaySyncAtMillis) > 7L * 24 * 3600_000 ||
+                store.holidayYear != year
+            if (!stale) return@launch
+            val dates = com.ncepu.jw.data.HolidayClient.fetchYear(year).getOrNull() ?: return@launch
+            val merged = dates.toMutableSet()
+            // 临近年末:提前把次年假期也取回,避免跨年真空期
+            if (cal.get(java.util.Calendar.MONTH) + 1 >= 11) {
+                com.ncepu.jw.data.HolidayClient.fetchYear(year + 1).getOrNull()?.let { merged += it }
+            }
+            store.skippedDates = merged
+            store.holidayYear = year
+            store.holidaySyncAtMillis = now
+            if (store.reminderEnabled) ReminderScheduler.reschedule(getApplication())
+            com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(getApplication())
         }
     }
 
@@ -1339,6 +1374,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 selectedWeek = officialWeek
                 settings.scheduleSource = "MANUAL"
                 settings.cacheCourses(parsed)
+                com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(getApplication())
                 if (settings.reminderEnabled) {
                     ReminderScheduler.reschedule(getApplication())
                 }
@@ -1451,13 +1487,30 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         exams = emptyList(); examError = null
         loginError = null
         ReminderScheduler.reschedule(getApplication())
+        com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(getApplication())
     }
 }
 
 /** 未登录提示(课表/成绩页) */
 class MainActivity : ComponentActivity() {
+
+    private val vm: AppViewModel by viewModels()
+
+    companion object { const val EXTRA_TAB = "widget_tab" }
+
+    private fun applyTabExtra(intent: android.content.Intent?) {
+        intent?.getIntExtra(EXTRA_TAB, -1)?.takeIf { it >= 0 }?.let { vm.pendingTab = it }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        applyTabExtra(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applyTabExtra(intent)
         // edge-to-edge:内容延伸到状态栏/导航条后面,背景与暗化全屏覆盖
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val settings = SettingsStore(this)
@@ -1812,6 +1865,12 @@ class MainActivity : ComponentActivity() {
                             onUseImportedChange = { vm.setUseImportedXls(it) },
                             webvpnEnabled = vm.webvpnEnabled,
                             onWebvpnChange = { vm.toggleWebvpn(it) },
+                            widgetStyle = vm.widgetStyle,
+                            onWidgetStyleChange = {
+                                vm.widgetStyle = it
+                                vm.settings.widgetStyle = it
+                                com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(ctx)
+                            },
                             update = vm.updateState,
                             currentVersion = com.ncepu.jw.update.Updater.currentVersionName(ctx),
                             onCheckUpdate = { vm.checkForUpdate(force = true) },
@@ -1866,10 +1925,12 @@ class MainActivity : ComponentActivity() {
                                 vm.sectionTimes = times
                                 vm.settings.sectionTimes = times
                                 ReminderScheduler.reschedule(ctx)
+                                com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(ctx)
                             },
                             onWeekStartChange = { millis ->
                                 vm.settings.weekStartMillis = millis
                                 onAppearanceChange(appearance.copy(weekStartMillis = millis))
+                                com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(ctx)
                             },
                             onBack = { navController.popBackStack() },
                         )
@@ -2050,6 +2111,14 @@ class MainActivity : ComponentActivity() {
         // rememberSaveable:进扫码等子路由时 main 离开组合,返回后需恢复所选 tab(否则回到课表)
         var tab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
         val ctx = LocalContext.current
+        // 小部件深链:切到指定 tab(1=饮水)并加载其数据,消费后清空
+        androidx.compose.runtime.LaunchedEffect(vm.pendingTab) {
+            vm.pendingTab?.let { t ->
+                tab = t
+                if (t == 1) vm.loadWaterDevices(silent = vm.waterState.devices.isNotEmpty())
+                vm.pendingTab = null
+            }
+        }
 
         // 背景层:View 容器常驻渲染树(背景图 + 暗化一体)。
         // 暗化用 FrameLayout 前景实现,必然覆盖全容器(含状态栏/导航条区域)。

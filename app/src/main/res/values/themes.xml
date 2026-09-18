@@ -4,4 +4,13 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
     </style>
+
+    <!-- 小部件文本描边阴影:仅设 shadow*,不覆盖各视图颜色/字号。
+         半透明样式遇浅色壁纸透出时,保证白字仍可读;深/浅色样式下阴影不可见无副作用。 -->
+    <style name="WidgetText">
+        <item name="android:shadowColor">#80000000</item>
+        <item name="android:shadowDx">0</item>
+        <item name="android:shadowDy">0</item>
+        <item name="android:shadowRadius">4</item>
+    </style>
 </resources>
