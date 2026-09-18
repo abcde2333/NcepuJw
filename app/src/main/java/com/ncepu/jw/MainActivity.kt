@@ -381,13 +381,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 val manual = settings.waterDevices.filter { m -> remote.none { it.first == m.first } }
                 // 长按排序后的自定义顺序应用;新出现的 did 追加在后
                 val all = settings.applyWaterOrder((remote + manual).distinctBy { it.first }) { it.first }
-                // 逐台查真实状态:非99=出水中(顺带记录已出水量,支持"接水中"恢复)
+                // 逐台查真实状态:非99=出水中(恢复按钮的出水状态)
                 val merged = all.map { (did, name) ->
                     val st = try { ilife.deviceStatus(waterToken, did) } catch (_: Exception) { null }
-                    if (st != null && st.drinking) {
-                        waterOut[did] = st.out
-                        if (!waterStartAt.containsKey(did)) waterStartAt[did] = System.currentTimeMillis()
-                    }
                     Triple(did, name, st?.drinking ?: (waterState.devices.firstOrNull { it.first == did }?.third ?: false))
                 }
                 // 锁定当前显示顺序(含新设备),供下次稳定排序
@@ -839,8 +835,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     /** 每台设备在途的操作(防连点竞态:迟到的 start 响应不得覆盖之后的 end) */
     private val waterOps = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val waterLastOpAt = HashMap<String, Long>()
-    private val waterStartAt = HashMap<String, Long>()
-    private val waterOut = HashMap<String, Double>()
     private val waterIdle = HashMap<String, Int>()
     private var waterPollJob: kotlinx.coroutines.Job? = null
 
@@ -867,7 +861,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     /**
      * 出水/结束:点"出水"→按钮"结束出水"并起真实状态轮询(ui/app/dev/status);
-     * 点"结束"成功或报错(机身已停)→结束并结算通知;轮询发现机身停止也自动结算。
+     * 点"结束"成功或报错(机身已停)→结束;轮询发现机身停止也自动收尾。
      */
     private fun toggleWaterDevice(did: String, start: Boolean) {
         if (waterOps[did]?.isActive == true) return
@@ -882,7 +876,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     val r = ilife.start(waterToken, did)
                     waterState = waterState.copy(loading = false)
                     if (r.ok) {
-                        waterStartAt[did] = now; waterOut[did] = 0.0; waterIdle[did] = 0
+                        waterIdle[did] = 0
                         waterState = waterState.copy(message = "设备已启动,请接水")
                         ensureWaterPoller()
                     } else {
@@ -891,8 +885,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     }
                 } else {
                     val r = ilife.end(waterToken, did)
-                    val st = runCatching { ilife.deviceStatus(waterToken, did) }.getOrNull()
-                    settleWater(did, st?.out ?: waterOut[did] ?: 0.0)
                     setWaterRunning(did, false); waterIdle[did] = 0
                     waterState = waterState.copy(
                         loading = false,
@@ -928,53 +920,15 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     private suspend fun pollWaterDevice(did: String) {
         val st = try { ilife.deviceStatus(waterToken, did) } catch (_: Exception) { null } ?: return
         if (st.drinking) {
-            waterIdle[did] = 0; waterOut[did] = st.out
-            if (!waterStartAt.containsKey(did)) waterStartAt[did] = System.currentTimeMillis()
+            waterIdle[did] = 0
             setWaterRunning(did, true)
         } else {
             val c = (waterIdle[did] ?: 0) + 1; waterIdle[did] = c
             if (c >= 5) {   // 连续空闲判定结束(设备抖动宽容,参考 Super798App)
                 setWaterRunning(did, false); waterIdle[did] = 0
-                settleWater(did, waterOut[did] ?: 0.0)
-                runCatching { ilife.end(waterToken, did) }  // 补发结算,忽略错误
+                runCatching { ilife.end(waterToken, did) }  // 机身已停,补发结束,忽略错误
             }
         }
-    }
-
-    /** 结束通知:真实出水量(gene.out)+ 本次用时 */
-    private fun settleWater(did: String, out: Double) {
-        val startMs = waterStartAt.remove(did) ?: 0L
-        val dur = if (startMs > 0) System.currentTimeMillis() - startMs else 0L
-        waterOut.remove(did)
-        val name = waterState.devices.firstOrNull { it.first == did }?.second?.ifBlank { "饮水机" } ?: "饮水机"
-        val mins = dur / 60000; val secs = (dur / 1000) % 60
-        val text = buildString {
-            append("接水结束")
-            if (out > 0) append(" · 约 ${String.format(java.util.Locale.US, "%.2f", out)} 升")
-            if (dur > 0) append(" · 用时 ${mins}分${secs}秒")
-        }
-        postWaterNotification(name, text)
-    }
-
-    private fun postWaterNotification(title: String, text: String) {
-        val ctx = getApplication<android.app.Application>()
-        val nm = ctx.getSystemService(android.app.NotificationManager::class.java)
-        if (android.os.Build.VERSION.SDK_INT >= 26) {
-            val ch = android.app.NotificationChannel("water_notice", "饮水提醒", android.app.NotificationManager.IMPORTANCE_DEFAULT)
-            nm?.createNotificationChannel(ch)
-        }
-        if (android.os.Build.VERSION.SDK_INT >= 33 &&
-            ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
-            android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) return
-        val n = androidx.core.app.NotificationCompat.Builder(ctx, "water_notice")
-            .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(text))
-            .setAutoCancel(true)
-            .build()
-        nm?.notify((System.currentTimeMillis() and 0x7FFFFFFF).toInt(), n)
     }
 
     fun tryAutoLogin() {

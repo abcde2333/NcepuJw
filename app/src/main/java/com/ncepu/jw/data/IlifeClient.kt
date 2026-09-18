@@ -138,9 +138,9 @@ class IlifeClient {
 
     /**
      * 设备实时状态(专用接口 ui/app/dev/status)。
-     * status:99=空闲,非99=正在出水;out=本次累计出水量(升)。参考 Super798App。
+     * status:99=空闲,非99=正在出水。服务端无可靠出水量数字,故不解析水量(参考 life-798)。
      */
-    data class DevStatus(val status: Int, val out: Double, val vel: Double) {
+    data class DevStatus(val status: Int) {
         val drinking: Boolean get() = status != 99
     }
 
@@ -152,11 +152,7 @@ class IlifeClient {
         if (!r.ok) return@withContext null
         val gene = r.json?.optJSONObject("data")?.optJSONObject("device")?.optJSONObject("gene")
             ?: return@withContext null
-        DevStatus(
-            status = gene.optInt("status", 99),
-            out = if (gene.has("out")) gene.optDouble("out", 0.0) else 0.0,
-            vel = if (gene.has("vel")) gene.optDouble("vel", 0.0) else 0.0,
-        )
+        DevStatus(status = gene.optInt("status", 99))
     }
 
     /** 启动饮水机 */
