@@ -11,3 +11,4 @@ build
 *.aab
 .kotlin
 release.keystore
+HANDOFF.md
