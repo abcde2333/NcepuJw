@@ -346,6 +346,7 @@ fun ScheduleScreen(
                     Text(c.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
                     listOf(
+                        "老师" to c.teacher,
                         "地点" to c.room,
                         "周次" to c.weeks,
                         "学分" to c.credit,
