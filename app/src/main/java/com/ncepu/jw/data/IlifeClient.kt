@@ -22,8 +22,9 @@ class IlifeClient {
 
     companion object {
         const val BASE = "https://i.ilife798.com/api/v1"
-        private const val UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) " +
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Html5Plus/1.0 (Immersed/20) uni-app"
+        /** 冒充的慧生活官方版本号:服务端按它做最低版本校验,过低时接口只回"当前手机版本过旧" */
+        const val CLIENT_VERSION = "8.2.9"
+        private const val UA = "Android_ilife798_$CLIENT_VERSION"
         const val APP_TYPE_MAIN = "1,5"   // 账户服务
         const val APP_TYPE_APP = "1,1"    // 设备控制
 
@@ -84,6 +85,7 @@ class IlifeClient {
     ): Result {
         val builder = Request.Builder().url(url)
             .header("User-Agent", UA)
+            .header("VersionCode", CLIENT_VERSION)
             .header("ApplicationType", appType)
             .header("Accept-Language", "zh-Hans-CN;q=1")
         if (!token.isNullOrBlank()) builder.header("Authorization", token)
