@@ -255,6 +255,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
         // 启动时自动检查更新(12 小时节流,镜像站加速)
         viewModelScope.launch(Dispatchers.IO) { checkForUpdate(force = false) }
+        // 启动即同步节假日(内部按 7 天/换年节流):只靠"刷课表后同步"会让装完新版没刷课表的用户
+        // 在法定假日照常收到上课提醒
+        refreshHolidays()
         // 应用存活期间定时复检(每小时醒一次,实际请求仍受 12 小时节流)
         viewModelScope.launch {
             while (true) {
