@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.HowToReg
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -131,10 +133,11 @@ fun SelectionScreen(
         }
         if (courses.isEmpty()) {
             item {
-                Text(
+                EmptyState(
+                    Icons.Filled.HowToReg,
                     "暂无选课数据",
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(horizontal = 16.dp),
+                    "选课开放期内选完课后下拉刷新即可看到",
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
                 )
             }
         }

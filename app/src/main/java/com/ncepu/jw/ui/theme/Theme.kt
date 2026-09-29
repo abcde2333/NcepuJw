@@ -1,21 +1,17 @@
 package com.ncepu.jw.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.ColorScheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import com.materialkolor.dynamicColorScheme
 import com.ncepu.jw.data.ThemeMode
 
@@ -23,11 +19,15 @@ import com.ncepu.jw.data.ThemeMode
 @Immutable
 data class ThemePreset(val key: String, val label: String, val seed: Color)
 
-val NcepuBlue = Color(0xFF1E4F91)
-
 object ThemePresets {
+    /**
+     * 华电品牌蓝。登录页渐变这类装饰色用它,不跟随莫奈/预设——
+     * 否则动态取色一开,品牌色就被随机色相冲掉了。
+     */
+    val Brand = Color(0xFF1E4F91)
+
     val ALL = listOf(
-        ThemePreset("NCEPU", "华电蓝", Color(0xFF1E4F91)),
+        ThemePreset("NCEPU", "华电蓝", Brand),
         ThemePreset("CYAN", "青碧", Color(0xFF00897B)),
         ThemePreset("PURPLE", "黛紫", Color(0xFF7C4DFF)),
         ThemePreset("GREEN", "松绿", Color(0xFF2E7D32)),
@@ -64,30 +64,30 @@ fun NcepuTheme(
     val context = LocalContext.current
     val useMonet = dynamicColor && android.os.Build.VERSION.SDK_INT >= 31
 
-    // 莫奈取色较昂贵(读壁纸),缓存到状态里;不启用时必须清空,否则预设色永远被旧缓存盖住
-    var monetScheme by remember { mutableStateOf<ColorScheme?>(null) }
-    LaunchedEffect(useMonet, darkTheme) {
-        monetScheme = when {
-            useMonet && darkTheme -> dynamicDarkColorScheme(context)
-            useMonet -> dynamicLightColorScheme(context)
-            else -> null
-        }
+    // 整套配色(HCT 约 40 个角色)只在种子/深浅/莫奈开关变化时生成一次,重组不重算;
+    // 莫奈同步取系统色而非协程,避免首帧先渲染预设色再跳变
+    val baseScheme = remember(useMonet, darkTheme, preset.seed) {
+        val monet = if (useMonet) runCatching {
+            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        }.getOrNull() else null
+        monet ?: dynamicColorScheme(seedColor = preset.seed, isDark = darkTheme, isAmoled = false)
     }
-
-    val baseScheme = monetScheme
-        ?: dynamicColorScheme(seedColor = preset.seed, isDark = darkTheme, isAmoled = false)
 
     MaterialTheme(
         colorScheme = baseScheme,
+        shapes = NcepuShapes,
         content = content,
     )
 }
 
-private val LightColors = lightColorScheme(
-    primary = NcepuBlue,
-    onPrimary = Color.White,
-)
-
-private val DarkColors = darkColorScheme(
-    primary = Color(0xFFA8C8FF),
+/**
+ * 全局圆角。默认 M3 的 Card 是 12dp,和各页手写的 8/12/14dp 混在一起显得碎;
+ * 统一抬到 small 8 / medium 16 / large 20 / extraLarge 28(弹层)。
+ * 课表格子这类密集小卡仍显式用 8dp,不受 medium 影响。
+ */
+private val NcepuShapes = Shapes(
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(20.dp),
+    extraLarge = RoundedCornerShape(28.dp),
 )

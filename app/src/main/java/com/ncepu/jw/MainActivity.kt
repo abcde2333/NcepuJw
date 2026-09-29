@@ -57,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -93,6 +94,7 @@ import com.ncepu.jw.data.Semester
 import com.ncepu.jw.data.SettingsStore
 import com.ncepu.jw.data.ThemeMode
 import com.ncepu.jw.reminder.ReminderScheduler
+import com.ncepu.jw.ui.AboutScreen
 import com.ncepu.jw.ui.AppBottomBar
 import com.ncepu.jw.ui.BackgroundCropScreen
 import com.ncepu.jw.ui.ExamScreen
@@ -880,7 +882,11 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     waterState = waterState.copy(loading = false)
                     if (r.ok) {
                         waterIdle[did] = 0
-                        waterState = waterState.copy(message = "设备已启动,请接水")
+                        waterState = waterState.copy(
+                            message = "设备已启动,请接水",
+                            successDid = did,
+                            successTick = waterState.successTick + 1,
+                        )
                         ensureWaterPoller()
                     } else {
                         setWaterRunning(did, false)
@@ -1647,6 +1653,7 @@ class MainActivity : ComponentActivity() {
                                     navController.navigate("grades")
                                 }
                             },
+                            onOpenAbout = { navController.navigate("about") },
                             onEvaluate = {
                                 WebViewActivity.webSession = vm.client.cookieHeader()
                                 WebViewActivity.webvpnMode = vm.webvpnEnabled
@@ -1800,6 +1807,18 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+                    composable("about") {
+                        AboutScreen(
+                            versionName = com.ncepu.jw.update.Updater.currentVersionName(ctx),
+                            versionCode = runCatching {
+                                ctx.packageManager.getPackageInfo(ctx.packageName, 0).longVersionCode
+                            }.getOrDefault(0L),
+                            update = vm.updateState,
+                            onCheckUpdate = { vm.checkForUpdate(force = true) },
+                            onUpdateAction = { vm.onUpdateAction() },
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
                     composable("settings") {
                         SettingsScreen(
                             themeMode = themeMode,
@@ -1828,10 +1847,6 @@ class MainActivity : ComponentActivity() {
                                 vm.settings.widgetStyle = it
                                 com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(ctx)
                             },
-                            update = vm.updateState,
-                            currentVersion = com.ncepu.jw.update.Updater.currentVersionName(ctx),
-                            onCheckUpdate = { vm.checkForUpdate(force = true) },
-                            onUpdateAction = { vm.onUpdateAction() },
                             onThemeModeChange = onThemeModeChange,
                             onPresetChange = onPresetChange,
                             onDynamicColorChange = onDynamicColorChange,
@@ -2062,11 +2077,14 @@ class MainActivity : ComponentActivity() {
         onOpenWasher: () -> Unit,
         onOpenJwxtLogin: () -> Unit,
         onOpenGradesNav: () -> Unit,
+        onOpenAbout: () -> Unit,
         onEvaluate: () -> Unit,
         onEnterRound: (com.ncepu.jw.data.XkRound) -> Unit,
     ) {
         // rememberSaveable:进扫码等子路由时 main 离开组合,返回后需恢复所选 tab(否则回到课表)
         var tab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
+        // 饮水页正在拖拽设备卡片:收起底栏,让底部删除条有完整空间
+        var waterDragging by remember { mutableStateOf(false) }
         val ctx = LocalContext.current
         // 小部件深链:切到指定 tab(1=饮水)并加载其数据,消费后清空
         androidx.compose.runtime.LaunchedEffect(vm.pendingTab) {
@@ -2151,9 +2169,35 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+            // 背景图之上、内容之下:上下渐变压暗。只靠整屏均匀 dim 时中部发灰、
+            // 顶部时间列和底部内容又不够暗,主体也糊;这里叠两端 scrim,不动用户的 dim 档位
+            if (showBg) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0f to Color.Black.copy(alpha = 0.45f),
+                                0.3f to Color.Transparent,
+                                0.7f to Color.Transparent,
+                                1f to Color.Black.copy(alpha = 0.45f),
+                            ),
+                        ),
+                )
+            }
             Scaffold(
                 containerColor = if (showBg) Color.Transparent else MaterialTheme.colorScheme.background,
                 bottomBar = {
+                    // 饮水页拖拽设备时收起底栏;200ms 与 WaterScreen 的 BOTTOM_BAR_EXIT_MS(220ms)配套,
+                    // 底栏完全滑出后底部删除条才升起
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = !(waterDragging && tab == 1),
+                        enter = androidx.compose.animation.fadeIn(tween(200)) +
+                            androidx.compose.animation.slideInVertically(tween(200)) { it },
+                        exit = androidx.compose.animation.fadeOut(tween(200)) +
+                            androidx.compose.animation.slideOutVertically(tween(200)) { it },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                     AppBottomBar(
                         shape = appearance.navShape,
                         material = appearance.navMaterial,
@@ -2169,6 +2213,7 @@ class MainActivity : ComponentActivity() {
                         isDark = isDark,
                         backdrop = glassBackdrop,
                     )
+                    }
                 },
             ) { padding ->
                 Box(Modifier.padding(padding).fillMaxSize()) {
@@ -2200,6 +2245,7 @@ class MainActivity : ComponentActivity() {
                                 selected = vm.schedSem,
                                 sectionTimes = vm.settings.sectionTimes,
                                 bgEnabled = showBg,
+                                glassBackdrop = glassBackdrop,
                                 onSelectWeek = { vm.selectWeek(it) },
                                 onShowAll = { vm.showAllSemester() },
                                 onBackToWeek = { vm.backToCurrentWeek() },
@@ -2228,6 +2274,7 @@ class MainActivity : ComponentActivity() {
                                 onReorder = { from, to -> vm.moveWaterDevice(from, to) },
                                 onScan = onOpenWaterScan,
                                 scanResult = vm.waterScanResult,
+                        onDragActiveChange = { waterDragging = it },
                             )
                             2 -> SelectionScreen(
                                 loggedIn = vm.loggedIn,
@@ -2249,6 +2296,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenPyfa = onOpenPyfa,
                                 onOpenWasher = onOpenWasher,
                                 onOpenGrades = onOpenGradesNav,
+                                onOpenAbout = onOpenAbout,
                                 onLogout = {
                                     vm.settings.clearCredentials()
                                     vm.logout()

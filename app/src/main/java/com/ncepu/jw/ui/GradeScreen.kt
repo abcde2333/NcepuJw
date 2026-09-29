@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -40,7 +42,7 @@ fun GradeScreen(
     onEvaluate: (() -> Unit)? = null,
 ) {
     Column(Modifier.fillMaxSize()) {
-        SemesterBar(semesters, selected, onSemesterChange, trailing = if (onEvaluate != null) {
+        SemesterBar(semesters, selected, onSemesterChange, title = "成绩查询", trailing = if (onEvaluate != null) {
             {
                 Text(
                     "去评教",
@@ -70,16 +72,9 @@ fun GradeScreen(
             return@Column
         }
 
-        // GPA 汇总
-        val scored = grades.filter {
-            it.score.toDoubleOrNull() != null && it.credit.toDoubleOrNull() != null && it.gradePoint.toDoubleOrNull() != null
-        }
-        val totalCredit = scored.sumOf { it.credit.toDouble() }
-        // 有成绩记录但总学分为 0 时,sumOf/0.0 会得到 NaN/Infinity,须一并挡掉(显示 "--")
-        val avgScore = if (scored.isEmpty() || totalCredit <= 0.0) null else
-            scored.sumOf { it.score.toDouble() * it.credit.toDouble() } / totalCredit
-        val avgJd = if (scored.isEmpty() || totalCredit <= 0.0) null else
-            scored.sumOf { it.gradePoint.toDouble() * it.credit.toDouble() } / totalCredit
+        // GPA 汇总:口径对齐教务「成绩预览」单(等级制折算百分制 + 全部学分加权),算法见 GradeStats。
+        // 原来还额外要求"绩点列非空",而该部署的绩点列基本是空的 → 一条都不计入,三个数全成 "--"
+        val sum = com.ncepu.jw.data.GradeStats.summarize(grades)
 
         Card(
             Modifier
@@ -92,9 +87,9 @@ fun GradeScreen(
                     .padding(vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
             ) {
-                StatCell("加权平均分", avgScore?.let { String.format(Locale.US, "%.2f", it) } ?: "--")
-                StatCell("加权绩点", avgJd?.let { String.format(Locale.US, "%.2f", it) } ?: "--")
-                StatCell("总学分", if (scored.isEmpty()) "--" else String.format(Locale.US, "%.1f", totalCredit))
+                StatCell("加权平均分", sum.avgScore?.let { String.format(Locale.US, "%.2f", it) } ?: "--")
+                StatCell("加权绩点", sum.avgPoint?.let { String.format(Locale.US, "%.2f", it) } ?: "--")
+                StatCell("总学分", if (sum.counted == 0) "--" else String.format(Locale.US, "%.1f", sum.credits))
             }
         }
 
@@ -104,10 +99,12 @@ fun GradeScreen(
             }
             if (grades.isEmpty()) {
                 item {
-                    Box(Modifier.fillMaxWidth().padding(40.dp),
-                        contentAlignment = Alignment.Center) {
-                        Text("本学期暂无成绩", color = MaterialTheme.colorScheme.outline)
-                    }
+                    EmptyState(
+                        Icons.Filled.BarChart,
+                        "本学期暂无成绩",
+                        "成绩一般在考试后一到两周公布,可切换学期试试",
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                    )
                 }
             }
         }
@@ -156,7 +153,13 @@ private fun GradeItem(g: Grade) {
                         else -> MaterialTheme.colorScheme.primary
                     },
                 )
-                Text("学分${g.credit} 绩点${g.gradePoint.ifBlank { "-" }}",
+                // 该部署的绩点列常为空:空时按汇总同一口径折算,保证单行与合计不打架
+                val point = g.gradePoint.ifBlank {
+                    com.ncepu.jw.data.GradeStats.toScore(g.score)?.let {
+                        String.format(Locale.US, "%.1f", com.ncepu.jw.data.GradeStats.toPoint(it))
+                    }.orEmpty()
+                }
+                Text("学分${g.credit} 绩点${point.ifBlank { "-" }}",
                     fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
             }
         }

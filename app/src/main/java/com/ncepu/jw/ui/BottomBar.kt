@@ -162,13 +162,31 @@ fun AppBottomBar(
 }
 
 @Composable
-private fun barColor(material: NavMaterial, isDark: Boolean): Color = when (material) {
-    NavMaterial.SOLID -> MaterialTheme.colorScheme.surfaceContainer
-    NavMaterial.LIQUID -> if (isDark) Color(0xFF12181F).copy(alpha = 0.40f)
-                          else Color(0xFFFAFAFA).copy(alpha = 0.40f)
-    NavMaterial.BLUR -> if (isDark) Color(0xFF12181F).copy(alpha = 0.30f)
-                        else Color(0xFFFAFAFA).copy(alpha = 0.30f)
+private fun barColor(material: NavMaterial, isDark: Boolean): Color {
+    val base = MaterialTheme.colorScheme.surfaceContainer
+    return when (material) {
+        NavMaterial.SOLID -> base
+        // 深色:近黑 + 高不透明度,做成"烟熏黑玻璃"(壁纸只透出模糊暗影);浅色保持原样
+        NavMaterial.LIQUID -> glassBase(base, isDark)
+            .copy(alpha = if (isDark) 0.62f else 0.40f)
+        NavMaterial.BLUR -> glassBase(base, isDark)
+            .copy(alpha = if (isDark) 0.52f else 0.30f)
+    }
 }
+
+private val BarBlack = Color(0xFF08090B)
+
+/**
+ * 深色下玻璃底板要偏黑:surfaceContainer 在预设/莫奈配色里常是带彩的浅灰,
+ * 直接降透明度会让悬浮底栏发白发灰。先几乎压成纯黑再叠透明度。
+ */
+private fun glassBase(base: Color, isDark: Boolean): Color =
+    if (!isDark) base
+    else Color(
+        base.red + (BarBlack.red - base.red) * 0.92f,
+        base.green + (BarBlack.green - base.green) * 0.92f,
+        base.blue + (BarBlack.blue - base.blue) * 0.92f,
+    )
 
 /**
  * 液态玻璃底部标签栏。移植自 Kyant0/AndroidLiquidGlass catalog 的 LiquidBottomTabs:
@@ -183,10 +201,9 @@ private fun LiquidTabs(
     isDark: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val accentColor = if (isDark) Color(0xFF9AC1FF) else MaterialTheme.colorScheme.primary
-    val containerColor =
-        if (isDark) Color(0xFF12181F).copy(0.4f)
-        else Color(0xFFFAFAFA).copy(0.4f)
+    // 强调色/底板都跟随配色方案:原来深色下写死 #9AC1FF(基线蓝),换预设或莫奈时选中态会"串色"
+    val accentColor = MaterialTheme.colorScheme.primary
+    val containerColor = barColor(NavMaterial.LIQUID, isDark)
 
     val tabsBackdrop = rememberLayerBackdrop()
 
@@ -274,7 +291,8 @@ private fun LiquidTabs(
                     shape = { Capsule() },
                     effects = {
                         vibrancy()
-                        blur(8f.dp.toPx())
+                        // 深色下壁纸要糊成一团暗影(参考图效果),浅色保持原来的清透度
+                        blur(if (isDark) 14f.dp.toPx() else 8f.dp.toPx())
                         lens(24f.dp.toPx(), 24f.dp.toPx())
                     },
                     layerBlock = {

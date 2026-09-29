@@ -1,5 +1,10 @@
 package com.ncepu.jw.ui
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -7,9 +12,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
@@ -20,10 +27,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -39,21 +49,27 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ncepu.jw.data.Course
 import com.ncepu.jw.data.Semester
 import com.ncepu.jw.data.parseWeeks
+import com.kyant.backdrop.Backdrop
+import com.kyant.backdrop.drawBackdrop
+import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.vibrancy
+import com.kyant.backdrop.isRenderEffectSupported
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -144,6 +160,8 @@ fun ScheduleScreen(
     selected: Semester,
     sectionTimes: List<String>,
     bgEnabled: Boolean,
+    /** 背景图的隐形折射源(与液态玻璃底栏同源);为空时衬底退回半透明纯色 */
+    glassBackdrop: Backdrop? = null,
     onSelectWeek: (Int) -> Unit,
     onShowAll: () -> Unit,
     onBackToWeek: () -> Unit,
@@ -182,19 +200,84 @@ fun ScheduleScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
-        // ---- 头部 ----
+        // 日期行:留在面板之外,不铺衬底;刷新按钮固定在这一行的右上角
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            Modifier.fillMaxWidth().padding(start = 20.dp, end = 14.dp, top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    todayText,
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
+            Text(
+                todayText,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (onRefresh != null) {
+                Button(
+                    onClick = onRefresh,
+                    enabled = !loading,
+                    shape = RoundedCornerShape(percent = 50),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        start = 14.dp, end = 16.dp, top = 8.dp, bottom = 8.dp,
+                    ),
+                    elevation = ButtonDefaults.buttonElevation(
+                        defaultElevation = 3.dp,
+                        pressedElevation = 6.dp,
+                        disabledElevation = 0.dp,
+                    ),
+                ) {
+                    if (loading) {
+                        CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                    Text(
+                        "刷新",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
+            }
+        }
+
+        // 背景图模式下:信息栏与网格共用一块衬底。拿到折射源且系统支持 RenderEffect(API 31+)
+        // 时做成真毛玻璃——壁纸采样后去饱和+模糊再压一层 surface 色调;不支持时退回半透明纯色,
+        // 否则低版本上会垫一张没糊的壁纸,课卡文字直接读不出来。
+        val panelShape = RoundedCornerShape(16.dp)
+        val panelTint = if (bgEnabled) MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)
+        else Color.Transparent
+        val glass = glassBackdrop.takeIf { bgEnabled && it != null && isRenderEffectSupported() }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(horizontal = 6.dp)
+                .background(panelTint, panelShape)
+                .then(
+                    if (glass != null) Modifier.drawBackdrop(
+                        backdrop = glass,
+                        shape = { panelShape },
+                        effects = {
+                            vibrancy()
+                            blur(22f.dp.toPx())
+                        },
+                        onDrawSurface = { drawRect(panelTint) },
+                    ) else Modifier
                 )
+                .padding(bottom = 8.dp),
+        ) {
+            // ---- 信息栏:翻页 / 全部周次 + 右侧工具组 ----
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 if (mode == "WEEK") {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = {
                             scope.launch {
                                 pagerState.animateScrollToPage((pagerState.currentPage - 1).coerceAtLeast(0))
@@ -218,7 +301,9 @@ fun ScheduleScreen(
                             "全部",
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.clickable { onShowAll() },
+                            modifier = Modifier
+                                .clickable { onShowAll() }
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
                         )
                         if (page != officialWeek) {
                             Text(
@@ -226,10 +311,10 @@ fun ScheduleScreen(
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.outline,
                                 modifier = Modifier
-                                    .padding(start = 6.dp)
                                     .clickable {
                                         scope.launch { pagerState.animateScrollToPage(officialWeek - 1) }
-                                    },
+                                    }
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
                             )
                         }
                     }
@@ -238,22 +323,15 @@ fun ScheduleScreen(
                         "学期课表(全部周次) · ${selected.displayName}",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.clickable { onBackToWeek() },
-                    )
-                }
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                if (onRefresh != null) {
-                    Text(
-                        "刷新",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .clickable { onRefresh() }
-                            .padding(top = 4.dp, bottom = 2.dp),
+                            .weight(1f)
+                            .clickable { onBackToWeek() },
                     )
                 }
                 if (mode == "ALL") {
+                    Spacer(Modifier.width(6.dp))
                     SemesterPicker(semesters, selected, onSemesterChange)
                 }
                 if (onOpenExams != null) {
@@ -261,14 +339,15 @@ fun ScheduleScreen(
                         "考试安排 →",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.clickable { onOpenExams() }.padding(top = 4.dp),
+                        modifier = Modifier
+                            .clickable { onOpenExams() }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                     )
                 }
             }
-        }
 
-        // ---- 内容区 ----
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+            // ---- 内容区 ----
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             if (loading && allCourses.isEmpty()) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
@@ -302,9 +381,7 @@ fun ScheduleScreen(
                         )
                     }
                 }
-                loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
+                loading -> ScheduleSkeleton()
                 error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
@@ -330,6 +407,7 @@ fun ScheduleScreen(
                             )
                         }
                     }
+                }
                 }
             }
         }
@@ -410,7 +488,7 @@ fun SemesterBar(
     semesters: List<Semester>,
     selected: Semester,
     onChange: (Semester) -> Unit,
-    title: String = "课表",
+    title: String,   // 无默认值:成绩/考试页都靠它区分,给默认"课表"会让漏传的页面静默显示错标题
     trailing: (@Composable () -> Unit)? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -472,6 +550,7 @@ private fun CourseGrid(
         val colW = max(((screenW - timeColW.value - 10f) / 7f), 40f).dp
         val colWpx = with(LocalDensity.current) { colW.toPx() }
 
+        // 衬底已上移到课表页的面板列(信息栏 + 网格共用),这里只管铺格子
         Column(Modifier.fillMaxSize()) {
         // 表头
         Row(Modifier.padding(start = timeColW)) {
@@ -528,7 +607,7 @@ private fun CourseGrid(
                                 .padding(1.dp)
                                 .clickable { onCourseClick(p.course) },
                         ) {
-                            val colorIdx = abs(p.course.name.hashCode()) % CourseColors.size
+                            val colorIdx = p.course.name.hashCode().mod(CourseColors.size)
                             val fg = CourseColors[colorIdx]
                             Card(
                                 shape = RoundedCornerShape(8.dp),
@@ -583,6 +662,73 @@ private fun CourseGrid(
                 }
             }
         }
+        }
+    }
+}
+
+/** 骨架占位:每列一组 (起始节次, 跨节数),共 10 节 */
+private val SkeletonBlocks = listOf(
+    listOf(0 to 2, 3 to 2, 6 to 1),
+    listOf(1 to 3, 5 to 2),
+    listOf(0 to 1, 2 to 4),
+    listOf(1 to 2, 4 to 3),
+    listOf(0 to 3, 4 to 2),
+    listOf(2 to 2),
+    listOf(0 to 1, 3 to 1),
+)
+
+/**
+ * 首次加载骨架:列宽/行高和真课表一致,替代"白屏 + 转圈"。
+ * 呼吸用整块 graphicsLayer 的 alpha,读状态不触发子节点重组。
+ */
+@Composable
+private fun ScheduleSkeleton(modifier: Modifier = Modifier) {
+    val blockColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.16f)
+    val shimmer = rememberInfiniteTransition(label = "skeleton")
+    val shimmerAlpha by shimmer.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "shimmerAlpha",
+    )
+    Column(
+        modifier
+            .fillMaxSize()
+            .graphicsLayer { alpha = shimmerAlpha },
+    ) {
+        Row(Modifier.fillMaxWidth().height(26.dp).padding(horizontal = 6.dp)) {
+            Spacer(Modifier.width(30.dp))
+            repeat(7) {
+                Box(
+                    Modifier.weight(1f).fillMaxHeight().padding(horizontal = 3.dp)
+                        .background(blockColor, RoundedCornerShape(6.dp)),
+                )
+            }
+        }
+        Row(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 6.dp)) {
+            Column(Modifier.width(30.dp)) {
+                repeat(10) {
+                    Box(
+                        Modifier.weight(1f).fillMaxWidth().padding(vertical = 4.dp)
+                            .background(blockColor, RoundedCornerShape(4.dp)),
+                    )
+                }
+            }
+            SkeletonBlocks.forEach { blocks ->
+                Column(Modifier.weight(1f)) {
+                    var cursor = 0
+                    blocks.forEach { (start, span) ->
+                        if (start > cursor) Spacer(Modifier.weight((start - cursor).toFloat()))
+                        Box(
+                            Modifier.weight(span.toFloat()).fillMaxWidth()
+                                .padding(horizontal = 3.dp, vertical = 3.dp)
+                                .background(blockColor, RoundedCornerShape(8.dp)),
+                        )
+                        cursor = start + span
+                    }
+                    if (cursor < 10) Spacer(Modifier.weight((10 - cursor).toFloat()))
+                }
+            }
         }
     }
 }

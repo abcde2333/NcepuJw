@@ -10,6 +10,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -19,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,14 +61,12 @@ fun ExamScreen(
             return@Column
         }
         if (exams.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    "本学期暂无考试安排\n(期末考试安排一般在考前一至两个月发布)",
-                    color = MaterialTheme.colorScheme.outline,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    lineHeight = 20.sp,
-                )
-            }
+            EmptyState(
+                Icons.Filled.DateRange,
+                "本学期暂无考试安排",
+                "期末考试安排一般在考前一至两个月发布",
+                modifier = Modifier.fillMaxSize(),
+            )
             return@Column
         }
 
@@ -91,11 +94,16 @@ fun ExamScreen(
                                     modifier = Modifier.weight(1f),
                                 )
                                 if (e.type.isNotBlank()) {
+                                    // 补上 primaryContainer 胶囊底:光有字浮在卡片上像写了一半
                                     Text(
                                         e.type,
                                         fontSize = 11.sp,
                                         color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        modifier = Modifier
+                                            .padding(start = 8.dp)
+                                            .clip(RoundedCornerShape(percent = 50))
+                                            .background(MaterialTheme.colorScheme.primaryContainer)
+                                            .padding(horizontal = 8.dp, vertical = 2.dp),
                                     )
                                 }
                             }
@@ -117,7 +125,7 @@ fun ExamScreen(
                         }
                     }
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                // 卡片之间靠间距分隔即可,再叠一条 Divider 就成了双重分隔
             }
             item { Spacer(Modifier.height(24.dp)) }
         }

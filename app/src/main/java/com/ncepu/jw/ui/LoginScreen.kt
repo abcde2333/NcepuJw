@@ -47,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
@@ -65,6 +66,7 @@ import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.highlight.Highlight
 import com.kyant.shapes.Capsule
 import com.ncepu.jw.R
+import com.ncepu.jw.ui.theme.ThemePresets
 
 /** 登录方式:教务密码(强智直登)/ 统一认证(OAuth2 协议直登 + 网页降级) */
 private enum class LoginMode(val label: String, val icon: ImageVector) {
@@ -98,6 +100,9 @@ fun LoginScreen(
 
     // 液态玻璃折射源:品牌渐变 + 大校徽水印
     val backdrop = rememberLayerBackdrop()
+    // 品牌蓝固定,不跟莫奈/预设跑;深浅色只调浓度,否则深色下几乎看不出是蓝的
+    val brandBlue = ThemePresets.Brand
+    val onDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
     Box(Modifier.fillMaxSize()) {
         // 折射源层(仅进 backdrop 采样,视觉上就是登录页自己的底色)
@@ -108,9 +113,9 @@ fun LoginScreen(
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                            brandBlue.copy(alpha = if (onDark) 0.55f else 0.30f),
                             MaterialTheme.colorScheme.background,
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                            brandBlue.copy(alpha = if (onDark) 0.34f else 0.18f),
                         )
                     )
                 ),
@@ -121,7 +126,8 @@ fun LoginScreen(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(300.dp)
-                    .alpha(0.07f),
+                    // 校徽本体是 #0066B3 蓝,深色底上 0.07 几乎不可见,深色要提一档
+                    .alpha(if (onDark) 0.20f else 0.07f),
                 contentScale = ContentScale.Fit,
             )
         }
