@@ -35,6 +35,9 @@ class WasherWatchService : Service() {
         private const val NOTIFY_CHANNEL = "washer_notice"
         private const val FG_ID = 77001
 
+        /** 故障持续这么久(90 次 × 60s ≈ 1.5 小时)仍未恢复就不再后台轮询,避免无休止唤醒 */
+        private const val FAULT_GIVE_UP_POLLS = 90
+
         fun start(ctx: Context, orderId: String) {
             if (orderId.isBlank()) return
             SettingsStore(ctx).watchOrderId = orderId   // 供进程回收后 START_STICKY 恢复
@@ -61,6 +64,8 @@ class WasherWatchService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var cleanNotified = false
     private var doneNotified = false
+    private var faultNotified = false
+    private var faultPolls = 0
     private var lastStatus = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -89,6 +94,7 @@ class WasherWatchService : Service() {
             watchJob?.cancel()
             watchedId = orderId
             cleanNotified = false; doneNotified = false; lastStatus = ""
+            faultNotified = false; faultPolls = 0
         }
         watchJob = scope.launch {
             var miss = 0
@@ -97,33 +103,66 @@ class WasherWatchService : Service() {
                 runCatching { if (!wakeLock.isHeld) wakeLock.acquire(10_000L) }
                 try {
                     val r = runCatching { client.orderDetail(token, orderId) }.getOrNull()
-                    val o = UjingClient.Parsers.parseOrder(r?.json)
+                    val o = orderOf(r?.json)
                     if (o.orderId.isBlank()) {
                         if (++miss >= 4) break
                     } else {
                         miss = 0
-                        onStatus(orderId, o.status, o.selfCleanEnable)
+                        onStatus(orderId, o)
                         updateOngoing(statusLabel(o))
-                        if (o.status in setOf("50", "60")) break
+                        // 50/51/52/53/54 才是终态;60/61 故障中要继续盯(用户可能去关好门再点「继续洗衣」)
+                        if (o.terminal) break
+                        if (faultPolls >= FAULT_GIVE_UP_POLLS) break
                     }
                 } finally {
                     runCatching { if (wakeLock.isHeld) wakeLock.release() }
                 }
-                delay(20_000)
+                // 故障时放慢到 1 分钟一次(不知道用户何时排障),正常 20 秒
+                delay(if (faultPolls > 0) 60_000L else 20_000L)
             }
             SettingsStore(this@WasherWatchService).watchOrderId = ""
             stopSelf()
         }
     }
 
+    /**
+     * 解析订单详情并补 deviceTypeId:详情接口不一定带该字段,而故障码要按机型查子表,
+     * 故用已保存设备里扫码时记下的机型兜底。
+     */
+    private fun orderOf(json: org.json.JSONObject?): com.ncepu.jw.data.WasherOrderInfo {
+        val o = UjingClient.Parsers.parseOrder(json)
+        if (o.deviceTypeId != 0 || o.deviceId.isBlank()) return o
+        val t = SettingsStore(this).washerDevices.firstOrNull { it.did == o.deviceId }?.deviceTypeId ?: 0
+        return if (t != 0) o.copy(deviceTypeId = t) else o
+    }
+
     private fun statusLabel(o: com.ncepu.jw.data.WasherOrderInfo): String {
+        // 故障/暂停:直接显示原因(如 "E3 故障 · 请关闭门盖"),比只写"故障中"有用得多
+        if (o.faulted) return o.faultLine ?: "设备故障中,请查看机器面板"
         val t = o.statusText.ifBlank { UjingClient.statusText(o.status) }
         return if (o.remainTimeSeconds > 0) "$t · 剩余 ${o.remainTimeSeconds / 60} 分" else t
     }
 
-    private fun onStatus(orderId: String, status: String, selfCleanOrdered: Boolean) {
+    private fun onStatus(orderId: String, o: com.ncepu.jw.data.WasherOrderInfo) {
+        val status = o.status
+        if (o.faulted) {
+            faultPolls++
+            if (!faultNotified) {
+                faultNotified = true
+                notify(NOTIFY_CHANNEL, faultNoticeId(orderId), "洗衣故障:${o.errorCode.ifBlank { "未知" }}",
+                    (o.faultLine ?: "设备故障中") + "\n" + o.faultDetail +
+                        "\n处理后在 App 内点「继续洗衣」可接着洗完。")
+            }
+            lastStatus = status
+            return
+        }
+        if (faultNotified) {   // 故障恢复 → 收掉故障通知,便于下次再提醒
+            faultNotified = false
+            faultPolls = 0
+            getSystemService(NotificationManager::class.java)?.cancel(faultNoticeId(orderId))
+        }
         // 自洁完成(35):仅提醒一次
-        if (status == "35" && !cleanNotified && selfCleanOrdered) {
+        if (status == "35" && !cleanNotified && o.selfCleanEnable) {
             cleanNotified = true
             notify(NOTIFY_CHANNEL, "washer_clean_$orderId".hashCode(), "筒自洁完成",
                 "请在 5 分钟内点击「启动洗衣」开始洗涤,否则订单会自动取消")
@@ -134,6 +173,8 @@ class WasherWatchService : Service() {
         }
         lastStatus = status
     }
+
+    private fun faultNoticeId(orderId: String) = "washer_fault_$orderId".hashCode()
 
     private fun ensureChannels() {
         if (Build.VERSION.SDK_INT < 26) return

@@ -100,6 +100,7 @@ fun WasherScreen(
     onPay: () -> Unit,
     onRefreshOrder: () -> Unit,
     onStartWash: () -> Unit,
+    onContinueWash: () -> Unit = {},
     onAutoStartChange: (Boolean) -> Unit = {},
     onRemoveWasher: (String) -> Unit = {},
     onScan: () -> Unit = {},
@@ -429,6 +430,40 @@ fun WasherScreen(
                                         fontWeight = FontWeight.Medium,
                                         color = MaterialTheme.colorScheme.primary,
                                     )
+                                    // 故障中(状态 60/61):给出原因 + 处理办法,而不是只显示"故障中"
+                                    if (order.faulted) {
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.errorContainer,
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                                        ) {
+                                            Column(Modifier.padding(10.dp)) {
+                                                Text(
+                                                    order.faultLine ?: "设备故障中",
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                                )
+                                                val detail = order.faultDetail
+                                                if (detail.isNotBlank()) {
+                                                    Text(
+                                                        detail,
+                                                        fontSize = 12.sp,
+                                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                                        modifier = Modifier.padding(top = 3.dp),
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (order.canContinueWash) {
+                                        Text(
+                                            "若机器面板提示的问题已处理(常见是门没关好),点下方「继续洗衣」接着把程序跑完",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.outline,
+                                            modifier = Modifier.padding(top = 6.dp),
+                                        )
+                                    }
                                     if (state.selfCleanOrdered) {
                                         Text(
                                             "本单含筒自洁:自洁完成后需再次点击「启动洗衣」开始洗涤",
@@ -483,6 +518,16 @@ fun WasherScreen(
                                         if (UjingClient.canStartWash(order.status)) {
                                             Button(onClick = onStartWash, enabled = !state.loading) {
                                                 Text(if (state.isDryer) "启动烘干" else "启动洗衣")
+                                            }
+                                        }
+                                        // 故障中:官方 contiuneBtn(60/61,且非 LG 13kg、非 9kg 干衣机的水满/门/通信故障)
+                                        if (order.canContinueWash) {
+                                            Button(
+                                                onClick = onContinueWash,
+                                                enabled = !state.loading,
+                                                modifier = Modifier.padding(start = 6.dp),
+                                            ) {
+                                                Text("继续洗衣")
                                             }
                                         }
                                     }

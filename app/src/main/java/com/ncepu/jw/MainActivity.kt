@@ -564,16 +564,28 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     /**
      * 活跃订单状态 → 设备忙碌。含 20 待启动 / 22 自洁启动中 / 30 自洁中 / 35 自洁完成
-     * (5 分钟启动窗口内机器仍被本单占用)/ 40 运行中;10 待支付不算占用。
+     * (5 分钟启动窗口内机器仍被本单占用)/ 40 运行中 / 60·61 故障中
+     * (故障单仍占着机器,可点「继续洗衣」恢复);10 待支付不算占用。
      */
     private val activeOrderDevices = mutableSetOf<String>()
 
-    private fun washerBusyStatus(status: String) = status in setOf("20", "22", "30", "35", "40")
+    private fun washerBusyStatus(status: String) =
+        status in setOf("20", "22", "30", "35", "40", "60", "61")
 
     fun updateActiveOrder(deviceId: String, status: String) {
         activeOrderDevices.clear()
-        if (washerBusyStatus(status)) activeOrderDevices.add(deviceId)
-        settings.updateWasherStatus(deviceId, if (washerBusyStatus(status)) "使用中" else "空闲")
+        if (deviceId.isBlank()) return
+        val busy = washerBusyStatus(status)
+        if (busy) activeOrderDevices.add(deviceId)
+        // 故障中 → 设备卡片直接标「故障」,别还写着"使用中"
+        settings.updateWasherStatus(
+            deviceId,
+            when {
+                UjingClient.isFaultStatus(status) -> "故障"
+                busy -> "使用中"
+                else -> "空闲"
+            },
+        )
         washerState = washerState.copy(savedWashers = settings.washerDevices)
     }
 
@@ -631,7 +643,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             }
             val orderId = r.json?.optString("orderId", "") ?: ""
             val detail = ujing.orderDetail(washerToken, orderId)
-            val order = UjingClient.Parsers.parseOrder(detail.json)
+            val order = washerOrder(detail.json)
             val selfCleanOn = (model.additions.firstOrNull { it.key == "selfCleanId" }
                 ?.let { g -> washerState.selectedAdditions[g.key] ?: UjingClient.Parsers.defaultSelection(g) } ?: 0) != 0
             updateActiveOrder(deviceId, order.status)
@@ -659,13 +671,13 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             }
             // PayTask 返回串格式随 SDK 版本而变(resultStatus=9000 / {9000} / "9000"),稳健匹配 9000
             val sdkPaid = Regex("resultStatus[=:\\s{\\\"]+9000").containsMatchIn(result.toString())
-            var cur = UjingClient.Parsers.parseOrder(ujing.orderDetail(washerToken, order.orderId).json)
+            var cur = washerOrder(ujing.orderDetail(washerToken, order.orderId).json)
             // 支付结果补查:SDK 回调可能丢失,轮询订单是否已脱离"待支付(10)"(报告 §3.6)
             var tries = 0
             while (cur.status == "10" && tries < 8) {
                 kotlinx.coroutines.delay(1500); tries++
                 val dd = runCatching { ujing.orderDetail(washerToken, order.orderId) }.getOrNull()
-                if (dd?.json != null) cur = UjingClient.Parsers.parseOrder(dd.json)
+                if (dd?.json != null) cur = washerOrder(dd.json)
                 else runCatching { ujing.lastPayStatus(washerToken, order.orderId) }  // 备用探测,触发后端结算落库
             }
             val paid = sdkPaid || (cur.status.isNotEmpty() && cur.status != "10")
@@ -687,7 +699,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     washerState = washerState.copy(message = "自动启动失败:" + UjingClient.commandError(sr))
                 }
                 val d2 = ujing.orderDetail(washerToken, order.orderId)
-                washerState = washerState.copy(currentOrder = UjingClient.Parsers.parseOrder(d2.json))
+                washerState = washerState.copy(currentOrder = washerOrder(d2.json))
             }
             if (paid) {
                 ensureWasherPoller()
@@ -699,25 +711,51 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     // ---------- 订单状态轮询(前台 UI)+ 后台由 WasherWatchService 通知 ----------
     private var washerPollJob: kotlinx.coroutines.Job? = null
 
-    private fun isWasherTerminal(o: WasherOrderInfo) =
-        o.status in setOf("50", "60") ||
+    /**
+     * 解析订单详情并补上 deviceTypeId:详情接口不一定带这个字段,而故障码必须按机型查子表
+     * (查错表会显示"未收录的故障码")。优先用扫码时记下的机型,再回退到已保存设备。
+     */
+    private fun washerOrder(detail: org.json.JSONObject?): WasherOrderInfo {
+        val o = UjingClient.Parsers.parseOrder(detail)
+        if (o.deviceTypeId != 0) return o
+        val did = o.deviceId.ifBlank { washerState.scannedDevice.orEmpty() }
+        val t = washerScanned[did]?.first
+            ?: settings.washerDevices.firstOrNull { it.did == did }?.deviceTypeId
+            ?: 0
+        return if (t != 0) o.copy(deviceTypeId = t) else o
+    }
+
+    /**
+     * 订单是否已结束(可收起卡片、停掉监控)。终态口径:
+     *  - UjingClient.TERMINAL_STATUSES(50 完成 / 51 超时未支付 / 52 启动失败 / 53 取消 / 54 超时未启动);
+     *  - 或 statusRemark 里明说完成/结束/取消/已结算。
+     * **60/61 故障中不算结束** —— 卡片要留着,用户可以点「继续洗衣」把机器跑完
+     * (逆向 orderDetail.js:contiuneBtn 只在 60/61 出现)。
+     */
+    private fun isWasherTerminal(o: WasherOrderInfo): Boolean {
+        if (o.faulted) return false
+        return o.terminal ||
             o.statusText.contains("完成") || o.statusText.contains("结束") ||
             o.statusText.contains("取消") || o.statusText.contains("已结算")
+    }
 
     /**
      * 前台 UI 刷新用:仅同步订单(通知统一由 WasherWatchService 发,避免前后台重复)。
-     * 订单进入非活动态时停掉监控服务。
+     * 订单真正结束才停掉监控服务;故障中反而要保证它还在盯(用户可能离开 App 去关好门)。
      */
     private fun applyWasherOrder(o: WasherOrderInfo) {
-        if (o.status in setOf("50", "60")) {
+        if (isWasherTerminal(o)) {
             WasherWatchService.stop(getApplication())
+        } else if (o.faulted && settings.watchOrderId != o.orderId) {
+            // 故障单要保证后台还在盯(用户可能离开 App 去关好门);已在盯就别重复起服务
+            WasherWatchService.start(getApplication(), o.orderId)
         }
     }
 
     private suspend fun refreshWasherOrderSilently() {
         val cur = washerState.currentOrder ?: return
         val d = runCatching { ujing.orderDetail(washerToken, cur.orderId) }.getOrNull() ?: return
-        val no = UjingClient.Parsers.parseOrder(d.json)
+        val no = washerOrder(d.json)
         applyWasherOrder(no)
         updateActiveOrder(washerState.scannedDevice ?: "", no.status)
         if (isWasherTerminal(no)) {
@@ -748,7 +786,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         washerState = washerState.copy(loading = true)
         viewModelScope.launch {
             val d = ujing.orderDetail(washerToken, order.orderId)
-            val no = UjingClient.Parsers.parseOrder(d.json)
+            val no = washerOrder(d.json)
             applyWasherOrder(no)
             updateActiveOrder(washerState.scannedDevice ?: "", no.status)
             if (isWasherTerminal(no)) {
@@ -768,6 +806,31 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 washerState = washerState.copy(message = "启动失败:" + UjingClient.commandError(r))
             }
             washerRefresh()
+        }
+    }
+
+    /**
+     * 故障后「继续洗衣」:GET orders/{id}/control/continue(无请求体)。
+     * 官方只在 status∈{60,61} 展示该按钮 —— 面板报错、用户排障(多为门没关好)后继续把程序跑完。
+     * 受理后立刻刷新状态;未受理则把服务端 errorMessage 原样弹出来。
+     */
+    fun washerContinue() {
+        val order = washerState.currentOrder ?: return
+        viewModelScope.launch {
+            washerState = washerState.copy(loading = true)
+            val r = ujing.continueOrder(washerToken, order.orderId)
+            if (!UjingClient.commandAccepted(r)) {
+                washerState = washerState.copy(
+                    loading = false,
+                    message = "继续洗衣失败:" + UjingClient.commandError(r),
+                )
+            } else {
+                washerState = washerState.copy(
+                    loading = false,
+                    message = "已下发继续指令,请确认机器已恢复运行",
+                )
+                washerRefresh()
+            }
         }
     }
 
@@ -826,7 +889,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             val first = UjingClient.Parsers.firstRunning(full) ?: return@launch
             val (orderId, deviceId) = first
             val d = runCatching { ujing.orderDetail(washerToken, orderId) }.getOrNull() ?: return@launch
-            val order = UjingClient.Parsers.parseOrder(d.json)
+            val order = washerOrder(d.json)
             if (order.orderId.isBlank()) return@launch
             val did = deviceId.ifBlank { washerState.scannedDevice ?: "" }
             if (did.isNotBlank()) washerState = washerState.copy(scannedDevice = did)
@@ -1582,7 +1645,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        var pendingCropUri by mutableStateOf<android.net.Uri?>(null)
+        var pendingCropUri by remember { mutableStateOf<android.net.Uri?>(null) }
 
         val xlsPicker = rememberLauncherForActivityResult(
             ActivityResultContracts.GetContent(),
@@ -1740,6 +1803,7 @@ class MainActivity : ComponentActivity() {
                             onAutoStartChange = { vm.washerState = vm.washerState.copy(autoStartAfterPay = it) },
                             onRefreshOrder = { vm.washerRefresh() },
                             onStartWash = { vm.washerStart() },
+                            onContinueWash = { vm.washerContinue() },
                             onDryTimeChange = { vm.washerState = vm.washerState.copy(dryTimeMinutes = it) },
                             onSetWasherNote = { did, note -> vm.setWasherNote(did, note) },
                             onBack = { navController.popBackStack() },

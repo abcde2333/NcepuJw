@@ -44,21 +44,47 @@ class UjingClient {
             else -> msg.ifBlank { "错误 code=$code" }
         }
 
-        /** 订单状态 → 中文(依据 orderDetail.js 的 ORDER_STATUSTEXT) */
-        fun statusText(status: String): String = when (status) {
+        /**
+         * 订单状态 → 中文(依据 orderDetail.js 的 ORDER_STATUSTEXT 原表):
+         * 10 已预约 / 17 支付中 / 20 已支付 / 21 启动中 / 22 自洁启动中 / 24 正在投放洗衣液 /
+         * 29 退单保护 / 30 自洁中 / 35 自洁完成 / 40 运行中 / 50 订单完成 /
+         * 51 超时未支付 / 52 启动失败 / 53 订单已取消 / 54 超时未启动 / 60·61 故障中。
+         */
+        fun statusText(status: String): String = when (status.trim()) {
             "0" -> "已创建"
-            "10" -> "待支付"
+            "10" -> "已预约,待支付"
+            "17" -> "支付中"
             "20" -> "已支付,待启动"
             "21" -> "启动中"
             "22" -> "自洁启动中"
             "24" -> "正在投放洗衣液"
+            "29" -> "退单保护中"
             "30" -> "自洁中"
             "35" -> "自洁完成"
             "40" -> "运行中(洗涤)"
             "50" -> "订单完成"
-            "60" -> "已取消"
+            "51" -> "超时未支付"
+            "52" -> "启动失败"
+            "53" -> "订单已取消"
+            "54" -> "超时未启动"
+            "60", "61" -> "故障中"
             else -> "状态 $status"
         }
+
+        /**
+         * 终态订单(不必再轮询/通知):50 完成、51 超时未支付、52 启动失败、53 已取消、54 超时未启动。
+         * **60/61「故障中」不是终态** —— orderDetail.js 的 contiuneBtn 只在 60/61 出现,
+         * 用户随时可能点「继续洗衣」把机器跑起来,所以故障单要继续 watch。
+         */
+        val TERMINAL_STATUSES = setOf("50", "51", "52", "53", "54")
+
+        fun isTerminal(status: String): Boolean = status.trim() in TERMINAL_STATUSES
+
+        /**
+         * 故障中(官方 ORDER_STATUSTEXT 的 60/61)。**不是终态**:面板报错后机器仍占着本单,
+         * 用户可以点「继续洗衣」接着跑完,故卡片要留着、后台监控也不能停。
+         */
+        fun isFaultStatus(status: String): Boolean = WasherFaultCodes.isFaultStatus(status)
 
         /** 「启动洗衣」按钮可点的状态:待启动20 / 自洁启动中22 / 自洁完成35(报告:仅这三个) */
         fun canStartWash(status: String): Boolean = status in setOf("20", "22", "35")
@@ -286,6 +312,16 @@ class UjingClient {
     /** 暂停 */
     suspend fun stopOrder(token: String, orderId: String): Result = control(token, orderId, "stop")
 
+    /**
+     * 故障后「继续洗衣」:GET orders/{id}/control/continue。
+     * 官方 orderError.js 的 contiuneBtn(原文拼写如此)只在 status∈{60,61} 时出现,
+     * 对应面板报错后已排障(多为门没关好)再点继续把程序跑完。
+     */
+    suspend fun continueOrder(token: String, orderId: String): Result = control(token, orderId, "continue")
+
+    /** 重启(21 启动中卡住时用) */
+    suspend fun restartOrder(token: String, orderId: String): Result = control(token, orderId, "restart")
+
     /** 进行中订单列表(报告 §3.3):data 可能为数组或 {list/rows},故返回原始 JSON */
     suspend fun runningOrders(token: String): org.json.JSONObject? = withContext(Dispatchers.IO) {
         runCatching {
@@ -315,7 +351,7 @@ class UjingClient {
                 else -> null
             } ?: return null
             val o = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.firstOrNull {
-                it.optString("status", "") !in setOf("50", "60")
+                !isTerminal(it.optString("status", ""))
             } ?: return null
             val id = o.optString("orderId").ifBlank { o.optString("id") }
             return if (id.isBlank()) null else id to o.optString("deviceId", "")
@@ -444,12 +480,27 @@ class UjingClient {
                 cleanSelfEndTime = detail.optLong("cleanSelfEndTime", 0L),
                 selfCleanEnable = detail.optBoolean("selfCleanEnable", false) ||
                     detail.optString("selfCleanEnable", "") == "true",
+                // 故障相关(逆向 orderDetail.js 的 errCode 区块所需)
+                errorCode = detail.str("errorCode"),
+                deviceTypeId = detail.optInt("deviceTypeId", 0),
+                newGBStd = detail.boolish("newGBStd"),
+                boxTypeId = detail.boolish("boxTypeId"),
             )
         }
     }
 }
 
 private fun JSONObject.str(key: String): String = optString(key, "").trim()
+
+/** 容错布尔:true / 1 / "true" / "1" 都算 true(服务端两种写法都出现过) */
+private fun JSONObject.boolish(key: String): Boolean {
+    val v = opt(key) ?: return false
+    return when (v) {
+        is Boolean -> v
+        is Number -> v.toInt() != 0
+        else -> v.toString().trim().let { it == "1" || it.equals("true", true) }
+    }
+}
 
 /** 加购项的一个档位(标准量/大量等);价格单位分 */
 data class WasherAdditionOption(val id: Int, val name: String, val priceFen: Int)
@@ -485,4 +536,30 @@ data class WasherOrderInfo(
     val deviceId: String = "",
     val cleanSelfEndTime: Long = 0L,   // 自洁结束时间戳(后端算好下发;非空即已自洁完成)
     val selfCleanEnable: Boolean = false,
-)
+    /** 机器上报的故障码(如 "E3"/"E30"/"E50"),正常为空 */
+    val errorCode: String = "",
+    /** 机型 id(决定查哪张故障码子表,见 WasherFaultCodes) */
+    val deviceTypeId: Int = 0,
+    /** 新国标机型:E98 表示"门没关暂停"而非故障 */
+    val newGBStd: Boolean = false,
+    /** 储物柜类订单(官方在这种情况下不给停止按钮) */
+    val boxTypeId: Boolean = false,
+) {
+    /** 终态:不必再等结果(注意 60/61 故障中不算终态,要继续等用户「继续洗衣」) */
+    val terminal: Boolean get() = UjingClient.isTerminal(status)
+
+    /** 故障中(官方 ORDER_STATUSTEXT 的 60/61) */
+    val faulted: Boolean get() = WasherFaultCodes.isFaultStatus(status)
+
+    /** 故障一行文案;非故障态为 null */
+    val faultLine: String? get() = WasherFaultCodes.faultText(status, deviceTypeId, errorCode, newGBStd)
+
+    /** 故障详情全文(字典 errorMsg) */
+    val faultDetail: String get() = WasherFaultCodes.faultDetail(deviceTypeId, errorCode)
+
+    /** 是否给「继续洗衣」按钮(官方 contiuneBtn 同规则) */
+    val canContinueWash: Boolean get() = WasherFaultCodes.canContinueWash(status, deviceTypeId, errorCode)
+
+    /** 是否给「停止」按钮(官方 stopBtn 同规则:运行中/故障中且非储物柜) */
+    val canStop: Boolean get() = WasherFaultCodes.canStop(status, deviceTypeId, boxTypeId)
+}
