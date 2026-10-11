@@ -13,6 +13,16 @@ import androidx.core.app.NotificationManagerCompat
 import com.ncepu.jw.MainActivity
 import com.ncepu.jw.R
 import com.ncepu.jw.data.SettingsStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+
+/**
+ * 广播重活的执行域:onReceive 主线程只做分派,重活走 goAsync() 后丢到这里执行,
+ * 避免超过 10s 广播预算被系统判 ANR。
+ */
+private val reminderWorkScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
 /** 闹钟到点:发上课/考试提醒通知;收到刷新闹钟时重排未来 3 天;收到 dismiss 时定向取消 */
 class ReminderReceiver : BroadcastReceiver() {
@@ -31,8 +41,17 @@ class ReminderReceiver : BroadcastReceiver() {
             return
         }
         if (intent.getBooleanExtra("refresh", false)) {
-            ReminderScheduler.reschedule(context)
-            com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(context)  // 每日刷新同步小部件(今天/明天/周次)
+            // reschedule 要读 SP + 解析课表 JSON + 数十次 AlarmManager IPC,占主线程会顶爆广播预算 → goAsync
+            val pending = goAsync()
+            val app = context.applicationContext
+            reminderWorkScope.launch {
+                try {
+                    ReminderScheduler.reschedule(app)
+                    com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(app)  // 每日刷新同步小部件(今天/明天/周次)
+                } finally {
+                    pending.finish()
+                }
+            }
             return
         }
         val lead = SettingsStore(context).leadMinutes
@@ -175,10 +194,18 @@ class ReminderReceiver : BroadcastReceiver() {
 /** 系统重启后闹钟丢失,重建 */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            ReminderScheduler.reschedule(context)
-            com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(context)
-            com.ncepu.jw.widget.WidgetTicker.scheduleNext(context)
+        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        // 开机重建同样要读 SP + 解析课表 + 数十次 setExact/取消,主线程做会 ANR → goAsync
+        val pending = goAsync()
+        val app = context.applicationContext
+        reminderWorkScope.launch {
+            try {
+                ReminderScheduler.reschedule(app)
+                com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(app)
+                com.ncepu.jw.widget.WidgetTicker.scheduleNext(app)
+            } finally {
+                pending.finish()
+            }
         }
     }
 }

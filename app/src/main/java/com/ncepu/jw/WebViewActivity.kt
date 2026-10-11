@@ -126,6 +126,23 @@ class WebViewActivity : ComponentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        // WebView 必须显式拆掉:否则其内部线程与回调仍持有 Activity、View 树与已加载的教务页
+        // (含 cookie/JS 上下文),反复打开选课/评教会持续泄漏。
+        webView?.let { wv ->
+            runCatching {
+                (wv.parent as? android.view.ViewGroup)?.removeView(wv)
+                wv.stopLoading()
+                wv.loadUrl("about:blank")
+                wv.clearHistory()
+                wv.removeAllViews()
+                wv.destroy()
+            }
+        }
+        webView = null
+        super.onDestroy()
+    }
+
     /** 统一认证链路落地教务主界面 = 登录成功:抓取教务会话 cookie */
     private fun checkSsoSuccess(finishedUrl: String): Boolean {
         if (!finishedUrl.contains("jwxt.ncepu.edu.cn")) return false

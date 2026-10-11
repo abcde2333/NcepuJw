@@ -119,7 +119,9 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
      */
     suspend fun verifyWebLogin(): String? = withContext(Dispatchers.IO) {
         val main = get("/jsxsd/framework/xsMain.jsp").use { it.body?.string().orEmpty() }
-        if (isSessionLost(main) || main.length < 2000) return@withContext null
+        // 注意:已登录的 xsMain 大页里也含 "method=logon"(登出/脚本引用),
+        // 不能用通用 isSessionLost 的模糊启发式;只按硬失效标志判定。
+        if (main.contains("chucuole") || main.length < 2000) return@withContext null
         loggedIn = true
         tryFetchName()?.let { studentName = it }
         studentName ?: ""
