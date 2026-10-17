@@ -20,10 +20,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.VerifiedUser
@@ -52,6 +56,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -133,9 +138,14 @@ fun LoginScreen(
         }
 
         Column(
+            // imePadding:键盘弹出时把可用高度让出来,底部按钮/错误提示不再被压扁;
+            // verticalScroll:让出后若还装不下(小屏 + 三种登录方式)也能滚到提交按钮。
+            // 宽高都还是 fillMaxSize,内容比视口短时 Arrangement.Center 照旧居中。
             modifier = Modifier
                 .fillMaxSize()
+                .imePadding()
                 .padding(horizontal = 32.dp)
+                .verticalScroll(rememberScrollState())
                 .animateContentSize(spring(dampingRatio = 0.9f, stiffness = 380f)),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
@@ -176,7 +186,10 @@ fun LoginScreen(
                 label = { Text("学号") },
                 singleLine = true,
                 enabled = !loading,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Next,
+                ),
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(12.dp))
@@ -191,6 +204,17 @@ fun LoginScreen(
                 },
                 singleLine = true,
                 enabled = !loading,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Password,
+                    imeAction = ImeAction.Done,
+                ),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        if (!loading && account.isNotBlank() && password.isNotBlank()) {
+                            if (mode == LoginMode.JWXT) onLogin() else onSsoLogin()
+                        }
+                    }
+                ),
                 visualTransformation = if (showPassword) VisualTransformation.None
                 else PasswordVisualTransformation(),
                 trailingIcon = {

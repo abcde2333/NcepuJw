@@ -5,6 +5,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -12,9 +13,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -27,13 +28,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -41,6 +43,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,8 +52,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -57,6 +66,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ncepu.jw.data.Course
@@ -72,6 +82,7 @@ import java.util.Calendar
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val CourseColors = listOf(
@@ -86,6 +97,29 @@ private val TIME_RE = Regex("""(\d{1,2}):(\d{2})""")
 private val HH_MM = SimpleDateFormat("HH:mm", Locale.US)
 private val HEADER_DATE_FMT = SimpleDateFormat("yyyy/M/d", Locale.US)
 private val WEEK_DATE_FMT = SimpleDateFormat("M.d", Locale.US)
+
+/** 悬浮在背景图上的小图标/小字统一用这道阴影(与选课页大标题同一配方) */
+private val HEADER_SHADOW = Shadow(
+    color = Color.Black.copy(alpha = 0.45f),
+    offset = Offset(0f, 1.5f),
+    blurRadius = 6f,
+)
+
+/** 阴影副本的颜色:比标题阴影再深一点,因为图标是细线条 */
+private val HEADER_SHADOW_COLOR = Color.Black.copy(alpha = 0.5f)
+
+/**
+ * 顶栏文字的描边光晕:浅色文字配深色光晕,深色文字配浅色光晕。
+ *
+ * 开了背景图时文字颜色由 Palette 定(见 HeaderPalette),亮壁纸下会变成近黑色,
+ * 这时再用原来的深色阴影就成了"黑字描黑边",糊成一团;所以跟着文字颜色换。
+ * textColor = null(没开背景图)时保持原来的深色阴影。
+ */
+internal fun headerHaloColor(textColor: Color?): Color = when {
+    textColor == null -> HEADER_SHADOW_COLOR
+    textColor.luminance() > 0.5f -> HEADER_SHADOW_COLOR
+    else -> Color.White.copy(alpha = 0.55f)
+}
 
 /** 六大节开始时间 → 12 个小节的 (节号, 开始, 结束)
  *  华电作息:每节 45 分钟,大节内两节间课间 10 分钟 */
@@ -143,9 +177,8 @@ private fun placeCourses(courses: List<Course>): List<PlacedCourse> {
 }
 
 /**
- * 课表页。
- * mode = WEEK:周视图(数据来自 xskb_list.do 全量解析,本地按周过滤),HorizontalPager 无缝左右滑
- * mode = ALL :学期全量视图(卡片带周次)
+ * 课表页:周视图(数据来自 xskb_list.do 全量解析,本地按周过滤),HorizontalPager 无缝左右滑。
+ * 只保留周视图 —— 「查看全部课表(学期全量)」已移除;表头/时间轴字号统一走 AppTypography。
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -153,20 +186,15 @@ fun ScheduleScreen(
     loading: Boolean,
     error: String?,
     allCourses: List<Course>,
-    mode: String,
     officialWeek: Int,
     weekStartMillis: Long = 0L,
-    semesters: List<Semester>,
-    selected: Semester,
     sectionTimes: List<String>,
     bgEnabled: Boolean,
     /** 背景图的隐形折射源(与液态玻璃底栏同源);为空时衬底退回半透明纯色 */
     glassBackdrop: Backdrop? = null,
-    onSelectWeek: (Int) -> Unit,
-    onShowAll: () -> Unit,
-    onBackToWeek: () -> Unit,
-    onSemesterChange: (Semester) -> Unit,
     onRetry: () -> Unit,
+    /** 扫码入口:扫洗衣机/饮水机机身码后自动分页(见 QrScanRouter) */
+    onScan: (() -> Unit)? = null,
     onRefresh: (() -> Unit)? = null,
     diag: String = "",
     onOpenExams: (() -> Unit)? = null,
@@ -200,47 +228,47 @@ fun ScheduleScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
-        // 日期行:留在面板之外,不铺衬底;刷新按钮固定在这一行的右上角
+        // 日期行:留在面板之外,不铺衬底;右侧是图标在上、文字在下的两个动作(扫码在刷新左边)
         Row(
-            Modifier.fillMaxWidth().padding(start = 20.dp, end = 14.dp, top = 8.dp, bottom = 4.dp),
+            Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 todayText,
+                // 开了背景图时由 Palette 定(见 HeaderPalette),否则用主题色
+                color = LocalHeaderContentColor.current ?: MaterialTheme.colorScheme.onSurface,
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            if (onScan != null) {
+                HeaderIconAction(label = "扫码", onClick = onScan) {
+                    Icon(
+                        Icons.Filled.QrCodeScanner,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
+            if (onScan != null && onRefresh != null) Spacer(Modifier.width(10.dp))
             if (onRefresh != null) {
-                Button(
+                HeaderIconAction(
+                    label = "刷新",
                     onClick = onRefresh,
                     enabled = !loading,
-                    shape = RoundedCornerShape(percent = 50),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        start = 14.dp, end = 16.dp, top = 8.dp, bottom = 8.dp,
-                    ),
-                    elevation = ButtonDefaults.buttonElevation(
-                        defaultElevation = 3.dp,
-                        pressedElevation = 6.dp,
-                        disabledElevation = 0.dp,
-                    ),
+                    shadow = !loading,
                 ) {
                     if (loading) {
-                        CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp)
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     } else {
                         Icon(
                             Icons.Filled.Refresh,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(22.dp),
                         )
                     }
-                    Text(
-                        "刷新",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(start = 6.dp),
-                    )
                 }
             }
         }
@@ -276,63 +304,38 @@ fun ScheduleScreen(
                 Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (mode == "WEEK") {
-                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = {
-                            scope.launch {
-                                pagerState.animateScrollToPage((pagerState.currentPage - 1).coerceAtLeast(0))
-                            }
-                        }) {
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "上一周")
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = {
+                        scope.launch {
+                            pagerState.animateScrollToPage((pagerState.currentPage - 1).coerceAtLeast(0))
                         }
-                        Text(
-                            "第 $page 周",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        IconButton(onClick = {
-                            scope.launch {
-                                pagerState.animateScrollToPage((pagerState.currentPage + 1).coerceAtMost(24))
-                            }
-                        }) {
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "下一周")
-                        }
-                        Text(
-                            "全部",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .clickable { onShowAll() }
-                                .padding(horizontal = 6.dp, vertical = 4.dp),
-                        )
-                        if (page != officialWeek) {
-                            Text(
-                                "(本周第${officialWeek}周)",
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.outline,
-                                modifier = Modifier
-                                    .clickable {
-                                        scope.launch { pagerState.animateScrollToPage(officialWeek - 1) }
-                                    }
-                                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                            )
-                        }
+                    }) {
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "上一周")
                     }
-                } else {
                     Text(
-                        "学期课表(全部周次) · ${selected.displayName}",
+                        "第 $page 周",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { onBackToWeek() },
                     )
-                }
-                if (mode == "ALL") {
-                    Spacer(Modifier.width(6.dp))
-                    SemesterPicker(semesters, selected, onSemesterChange)
+                    IconButton(onClick = {
+                        scope.launch {
+                            pagerState.animateScrollToPage((pagerState.currentPage + 1).coerceAtMost(24))
+                        }
+                    }) {
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "下一周")
+                    }
+                    if (page != officialWeek) {
+                        Text(
+                            "(本周第${officialWeek}周)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier
+                                .clickable {
+                                    scope.launch { pagerState.animateScrollToPage(officialWeek - 1) }
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                        )
+                    }
                 }
                 if (onOpenExams != null) {
                     Text(
@@ -352,13 +355,6 @@ fun ScheduleScreen(
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
             when {
-                mode == "ALL" -> CourseGrid(
-                    courses = allCourses,
-                    showWeeks = true,
-                    sectionTimes = sectionTimes,
-                    onBackground = bgEnabled,
-                    onCourseClick = { selectedCourse = it },
-                )
                 allCourses.isNotEmpty() -> HorizontalPager(
                     state = pagerState,
                     modifier = Modifier.fillMaxSize(),
@@ -373,7 +369,6 @@ fun ScheduleScreen(
                         val weekDates = remember(week, weekStartMillis) { weekDatesFor(week, weekStartMillis) }
                         CourseGrid(
                             courses = weekCourses,
-                            showWeeks = false,
                             sectionTimes = sectionTimes,
                             onBackground = bgEnabled,
                             weekDates = weekDates,
@@ -461,24 +456,63 @@ private fun weekDatesFor(week: Int, weekStartMillis: Long): List<String> {
     }
 }
 
+/**
+ * 日期行右侧的图标动作:图标在上、文字在下、无底色无描边(照参考图)。
+ * 点击区带 8dp/4dp 内边距 + 圆角水波纹,保证手感;enabled=false 时(如刷新中)不响应点击。
+ */
 @Composable
-private fun SemesterPicker(semesters: List<Semester>, selected: Semester, onChange: (Semester) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        Text(
-            "${selected.displayName} ▾",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.clickable { expanded = true },
-        )
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            semesters.forEach { s ->
-                DropdownMenuItem(
-                    text = { Text(s.displayName) },
-                    onClick = { expanded = false; onChange(s) },
-                )
+internal fun HeaderIconAction(
+    label: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    /** 图标阴影:加载中的圆圈指示器自带颜色,给它加阴影会变成一圈彩色光晕,所以那种情况传 false */
+    shadow: Boolean = true,
+    icon: @Composable () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+            // 图标阴影:同一路径用深色再画一遍,下移 1.5dp 并虚化,压在花哨背景上也不会糊掉。
+            // 用 LocalContentColor 改色,所以调用点传进来的 Icon(默认取当前内容色)自动跟着变深。
+            // 系统 API 31 以下 Modifier.blur 是空操作,退化成"硬边深色副本",仍然有描深效果。
+            if (shadow) {
+                CompositionLocalProvider(
+                    LocalContentColor provides headerHaloColor(LocalHeaderContentColor.current),
+                ) {
+                    Box(
+                        Modifier
+                            .graphicsLayer { translationY = 1.5.dp.toPx() }
+                            .blur(4.dp),
+                    ) { icon() }
+                }
+            }
+            // 开了背景图时图标跟着顶栏色走(Palette 算出来的黑或白),否则保持当前内容色
+            val headerColor = LocalHeaderContentColor.current
+            if (headerColor != null) {
+                CompositionLocalProvider(LocalContentColor provides headerColor) { icon() }
+            } else {
+                icon()
             }
         }
+        Text(
+            label,
+            fontSize = 11.sp,
+            lineHeight = 12.sp,
+            color = LocalHeaderContentColor.current?.copy(alpha = 0.92f)
+                ?: MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+            // 小字用同一道阴影(比大标题紧一点,11sp 用 6px 模糊会发虚)
+            style = LocalTextStyle.current.copy(
+                shadow = HEADER_SHADOW.copy(
+                    color = headerHaloColor(LocalHeaderContentColor.current),
+                    blurRadius = 4f,
+                ),
+            ),
+        )
     }
 }
 
@@ -520,19 +554,57 @@ fun SemesterBar(
     }
 }
 
+/** "HH:mm" → 当日分钟数;解析不出来返回 null */
+private fun minutesOf(hhmm: String): Int? {
+    val m = TIME_RE.find(hhmm) ?: return null
+    return m.groupValues[1].toInt() * 60 + m.groupValues[2].toInt()
+}
+
+/**
+ * 这节课此刻是否正在上。
+ * 三个条件都要满足:眼前这一列确实是今天(weekDates[day] == 今天)、时间落在它第一节到
+ * 最后一节之间、课表已知道节次时间。跨大节的中场休息(同一节课内部)也算在内,避免中途闪一下。
+ */
+private fun isOngoingNow(
+    course: Course,
+    dayIdx: Int,
+    slots: List<Triple<Int, String, String>>,
+    weekDates: List<String>,
+    todayDate: String,
+    nowMinutes: Int,
+): Boolean {
+    if (weekDates.getOrNull(dayIdx - 1) != todayDate) return false
+    val first = slots.firstOrNull { it.first == course.sections.first } ?: return false
+    val last = slots.firstOrNull { it.first == course.sections.last } ?: return false
+    val start = minutesOf(first.second) ?: return false
+    val end = minutesOf(last.third) ?: return false
+    return nowMinutes in start until end
+}
+
+// ---- 课表网格几何:真网格与骨架屏必须共用同一份,否则加载完成换成真网格时会跳 ----
+/** 单节行高 */
+private val GRID_ROW_H = 46.dp
+/** 左侧时间列宽 */
+private val GRID_TIME_COL_W = 44.dp
+/** 表头最小高度(真表头两行小字的高度下限) */
+private val GRID_HEADER_MIN_H = 36.dp
+
+/** 每天一列的列宽:让出时间列后七等分,左右各留 5dp */
+private fun gridColW(screenW: Float): Dp =
+    max(((screenW - GRID_TIME_COL_W.value - 10f) / 7f), 40f).dp
+
 /** 竖排网格:固定表头 + 自定义 Layout 平铺课程块(冲突课自动分栏),点击弹详情 */
 @Composable
 private fun CourseGrid(
     courses: List<Course>,
-    showWeeks: Boolean,
     sectionTimes: List<String>,
     onBackground: Boolean,
     weekDates: List<String> = emptyList(),
     onCourseClick: (Course) -> Unit,
 ) {
     val slots = remember(sectionTimes) { sectionSlots(sectionTimes) }
-    val rowH = 46.dp
-    val timeColW = 44.dp
+    val rowH = GRID_ROW_H
+    val timeColW = GRID_TIME_COL_W
     val todayIdx = remember {
         val dow = Calendar.getInstance().get(Calendar.DAY_OF_WEEK)
         when (dow) {
@@ -542,12 +614,27 @@ private fun CourseGrid(
         }
     }
     val placed = remember(courses) { placeCourses(courses) }
+
+    // 正在上的课要描一圈主题色边框:每 20s 走一次时钟(跨节次边界最多晚 20s 出现/消失)。
+    // 用 weekDates 里的日期判"眼前这一列就是今天",翻到别的周不会误高亮。
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(20_000)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+    val nowCal = remember(nowMillis) {
+        Calendar.getInstance().apply { timeInMillis = nowMillis }
+    }
+    val nowMinutes = nowCal.get(Calendar.HOUR_OF_DAY) * 60 + nowCal.get(Calendar.MINUTE)
+    val todayDate = remember(nowMillis) { WEEK_DATE_FMT.format(nowCal.time) }
     val rowHpx = with(LocalDensity.current) { rowH.toPx() }
 
     // BoxWithConstraints:不订阅 LocalConfiguration(避免配置变化引发整格重组),直接用分配到的宽度
     androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
         val screenW = maxWidth.value
-        val colW = max(((screenW - timeColW.value - 10f) / 7f), 40f).dp
+        val colW = gridColW(screenW)
         val colWpx = with(LocalDensity.current) { colW.toPx() }
 
         // 衬底已上移到课表页的面板列(信息栏 + 网格共用),这里只管铺格子
@@ -557,7 +644,7 @@ private fun CourseGrid(
             DAY_LABELS.forEachIndexed { i, label ->
                 Box(
                     Modifier
-                        .width(colW).padding(1.dp)
+                        .width(colW).padding(1.dp).heightIn(min = GRID_HEADER_MIN_H)
                         .background(
                             if (i + 1 == todayIdx) MaterialTheme.colorScheme.primary else Color.Transparent,
                             RoundedCornerShape(6.dp),
@@ -566,13 +653,13 @@ private fun CourseGrid(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            label, fontSize = 12.sp,
+                            label, style = MaterialTheme.typography.titleMedium,
                             color = if (i + 1 == todayIdx) MaterialTheme.colorScheme.onPrimary
                             else MaterialTheme.colorScheme.onSurface,
                         )
                         if (weekDates.getOrNull(i)?.isNotBlank() == true) {
                             Text(
-                                weekDates[i], fontSize = 8.sp,
+                                weekDates[i], style = MaterialTheme.typography.labelSmall,
                                 color = if (i + 1 == todayIdx) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
                                 else MaterialTheme.colorScheme.outline,
                             )
@@ -593,7 +680,8 @@ private fun CourseGrid(
                     Box(Modifier.height(rowH).fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Text(
                             "$no\n$start\n$end",
-                            fontSize = 8.sp, lineHeight = 9.sp, textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.labelSmall,
+                            textAlign = TextAlign.Center,
                             color = MaterialTheme.colorScheme.outline,
                         )
                     }
@@ -609,11 +697,24 @@ private fun CourseGrid(
                         ) {
                             val colorIdx = p.course.name.hashCode().mod(CourseColors.size)
                             val fg = CourseColors[colorIdx]
+                            val ongoing = isOngoingNow(
+                                p.course, p.day, slots, weekDates, todayDate, nowMinutes,
+                            )
                             Card(
                                 shape = RoundedCornerShape(8.dp),
                                 colors = androidx.compose.material3.CardDefaults.cardColors(
                                     containerColor = fg.copy(alpha = if (onBackground) 0.92f else 0.95f),
                                 ),
+                                // 正在上的课:一圈半透明主题色描边。底色本身就是饱和课程色,
+                                // 所以用淡化后的 primary(而不是实心)才不会糊住课程颜色
+                                border = if (ongoing) {
+                                    BorderStroke(
+                                        1.5.dp,
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.55f),
+                                    )
+                                } else {
+                                    null
+                                },
                                 modifier = Modifier.fillMaxSize(),
                             ) {
                                 Column(Modifier.padding(4.dp)) {
@@ -628,12 +729,6 @@ private fun CourseGrid(
                                         fontSize = 9.sp, lineHeight = 10.sp,
                                         color = Color.White.copy(alpha = 0.95f),
                                         maxLines = 3,
-                                    )
-                                    if (showWeeks && p.course.weeks.isNotBlank()) Text(
-                                        p.course.weeks,
-                                        fontSize = 8.sp,
-                                        color = Color.White.copy(alpha = 0.8f),
-                                        maxLines = 1,
                                     )
                                 }
                             }
@@ -678,7 +773,8 @@ private val SkeletonBlocks = listOf(
 )
 
 /**
- * 首次加载骨架:列宽/行高和真课表一致,替代"白屏 + 转圈"。
+ * 首次加载骨架:几何全部来自 GRID_* 常量(时间列宽/行高/列宽公式/表头起点),
+ * 与真课表逐像素对齐,加载完成换成真网格时不会跳。替代"白屏 + 转圈"。
  * 呼吸用整块 graphicsLayer 的 alpha,读状态不触发子节点重组。
  */
 @Composable
@@ -691,42 +787,46 @@ private fun ScheduleSkeleton(modifier: Modifier = Modifier) {
         animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
         label = "shimmerAlpha",
     )
-    Column(
-        modifier
-            .fillMaxSize()
-            .graphicsLayer { alpha = shimmerAlpha },
-    ) {
-        Row(Modifier.fillMaxWidth().height(26.dp).padding(horizontal = 6.dp)) {
-            Spacer(Modifier.width(30.dp))
-            repeat(7) {
-                Box(
-                    Modifier.weight(1f).fillMaxHeight().padding(horizontal = 3.dp)
-                        .background(blockColor, RoundedCornerShape(6.dp)),
-                )
-            }
-        }
-        Row(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 6.dp)) {
-            Column(Modifier.width(30.dp)) {
-                repeat(10) {
+    androidx.compose.foundation.layout.BoxWithConstraints(modifier.fillMaxSize()) {
+        val colW = gridColW(maxWidth.value)
+        Column(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = shimmerAlpha },
+        ) {
+            // 表头:起点让出时间列,每格宽列表宽,最小高度与真表头一致
+            Row(Modifier.padding(start = GRID_TIME_COL_W)) {
+                repeat(7) {
                     Box(
-                        Modifier.weight(1f).fillMaxWidth().padding(vertical = 4.dp)
-                            .background(blockColor, RoundedCornerShape(4.dp)),
+                        Modifier.width(colW).height(GRID_HEADER_MIN_H).padding(1.dp)
+                            .background(blockColor, RoundedCornerShape(6.dp)),
                     )
                 }
             }
-            SkeletonBlocks.forEach { blocks ->
-                Column(Modifier.weight(1f)) {
-                    var cursor = 0
-                    blocks.forEach { (start, span) ->
-                        if (start > cursor) Spacer(Modifier.weight((start - cursor).toFloat()))
+            Row(Modifier.fillMaxWidth()) {
+                Column(Modifier.width(GRID_TIME_COL_W)) {
+                    repeat(10) {
                         Box(
-                            Modifier.weight(span.toFloat()).fillMaxWidth()
-                                .padding(horizontal = 3.dp, vertical = 3.dp)
-                                .background(blockColor, RoundedCornerShape(8.dp)),
+                            Modifier.height(GRID_ROW_H).fillMaxWidth().padding(4.dp)
+                                .background(blockColor, RoundedCornerShape(4.dp)),
                         )
-                        cursor = start + span
                     }
-                    if (cursor < 10) Spacer(Modifier.weight((10 - cursor).toFloat()))
+                }
+                SkeletonBlocks.forEach { blocks ->
+                    Column(Modifier.width(colW)) {
+                        var cursor = 0
+                        blocks.forEach { (start, span) ->
+                            if (start > cursor) {
+                                Spacer(Modifier.height(GRID_ROW_H * (start - cursor)))
+                            }
+                            Box(
+                                Modifier.height(GRID_ROW_H * span).fillMaxWidth().padding(1.dp)
+                                    .background(blockColor, RoundedCornerShape(8.dp)),
+                            )
+                            cursor = start + span
+                        }
+                        if (cursor < 10) Spacer(Modifier.height(GRID_ROW_H * (10 - cursor)))
+                    }
                 }
             }
         }

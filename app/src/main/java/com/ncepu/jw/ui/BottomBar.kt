@@ -48,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
@@ -63,6 +64,7 @@ import androidx.compose.ui.util.fastCoerceIn
 import kotlin.math.roundToInt
 import androidx.compose.ui.util.lerp
 import com.kyant.backdrop.Backdrop
+import com.kyant.backdrop.isRenderEffectSupported
 import com.kyant.backdrop.backdrops.LayerBackdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberCombinedBackdrop
@@ -118,7 +120,12 @@ fun AppBottomBar(
             }
         }
         NavBarShape.FLOATING -> {
-            if (material == NavMaterial.LIQUID && backdrop != null) {
+            // 液态玻璃要 RenderEffect(API 31+)和折射源;拿不到就退回高斯模糊悬浮底栏,
+            // 而不是掉进"悬浮 + 实色"那种平板一块的观感
+            val liquidUsable = material == NavMaterial.LIQUID && backdrop != null && isRenderEffectSupported()
+            val floatingMaterial =
+                if (material == NavMaterial.LIQUID && !liquidUsable) NavMaterial.BLUR else material
+            if (liquidUsable) {
                 Box(Modifier.navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
                     LiquidTabs(
                         selectedTabIndex = { tab },
@@ -142,7 +149,7 @@ fun AppBottomBar(
                                 .fillMaxWidth()
                                 .height(60.dp)
                                 .background(
-                                    barColor(material, isDark),
+                                    barColor(floatingMaterial, isDark),
                                     RoundedCornerShape(26.dp),
                                 )
                                 .border(
@@ -166,11 +173,13 @@ private fun barColor(material: NavMaterial, isDark: Boolean): Color {
     val base = MaterialTheme.colorScheme.surfaceContainer
     return when (material) {
         NavMaterial.SOLID -> base
-        // 深色:近黑 + 高不透明度,做成"烟熏黑玻璃"(壁纸只透出模糊暗影);浅色保持原样
+        // 深色:近黑 + 高不透明度,做成"烟熏黑玻璃"(壁纸只透出模糊暗影)。
+        // 浅色:玻璃底板太透时,底栏文字/图标压在花壁纸或浅色照片上会糊,
+        // 提到 0.56/0.44(和内容卡片的 0.52 同一档),再配 1dp 描边 + 顶部高光保住对比
         NavMaterial.LIQUID -> glassBase(base, isDark)
-            .copy(alpha = if (isDark) 0.62f else 0.40f)
+            .copy(alpha = if (isDark) 0.62f else 0.56f)
         NavMaterial.BLUR -> glassBase(base, isDark)
-            .copy(alpha = if (isDark) 0.52f else 0.30f)
+            .copy(alpha = if (isDark) 0.52f else 0.44f)
     }
 }
 
@@ -302,6 +311,24 @@ private fun LiquidTabs(
                         scaleY = scale
                     },
                     onDrawSurface = { drawRect(containerColor) }
+                )
+                // 浅色对比保护:胶囊里叠一层顶部高光(玻璃厚度感),形状裁剪保证不出边
+                .then(
+                    if (isDark) Modifier
+                    else Modifier.background(
+                        Brush.verticalGradient(
+                            0f to Color.White.copy(alpha = 0.26f),
+                            0.55f to Color.White.copy(alpha = 0.08f),
+                            1f to Color.White.copy(alpha = 0f),
+                        ),
+                        Capsule(),
+                    )
+                )
+                .border(
+                    1.dp,
+                    if (isDark) Color.White.copy(alpha = 0.10f)
+                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.20f),
+                    Capsule(),
                 )
                 .then(interactiveHighlight.modifier)
                 .height(64f.dp)
@@ -492,6 +519,19 @@ private fun NavItem(
         )
     }
 }
+
+/**
+ * 悬浮底栏压在内容之上时,可滚动内容需要自己预留的底部空白。
+ *
+ * FLOATING 形态下底栏是"浮"在内容上方的,由 MainScaffold 量出底栏实高写进这里;
+ * 可滚动的页面把它加进列表的 contentPadding(而不是让 Scaffold 顶开整块内容),
+ * 内容就能一直铺到屏幕底、从底栏玻璃下面穿过,底栏上方不再留一条空白带。
+ * 继续用 Scaffold 底部内边距的页面(课表网格、我的)读到的是 0。
+ */
+val LocalBottomBarInset =
+    androidx.compose.runtime.staticCompositionLocalOf<androidx.compose.ui.unit.Dp> {
+        androidx.compose.ui.unit.Dp(0f)
+    }
 
 /** 给背景 ImageView 应用高斯模糊(API 31+) */
 fun applyBackgroundBlur(imageView: ImageView, radiusDp: Float, density: Float) {

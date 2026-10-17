@@ -76,6 +76,8 @@ fun NcepuTheme(
     MaterialTheme(
         colorScheme = baseScheme,
         shapes = NcepuShapes,
+        // 排版只钉 titleMedium(bodyMedium/labelSmall 三档,见 Typography.kt
+        typography = AppTypography,
         content = content,
     )
 }

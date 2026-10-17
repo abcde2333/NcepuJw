@@ -74,6 +74,13 @@ class IlifeClient {
 
     data class Result(val code: Int, val msg: String, val json: JSONObject?) {
         val ok: Boolean get() = code == 0
+
+        /**
+         * 服务端明确判定登录态无效时才为 true:业务码 -99(登录已过期),或 HTTP 401/403 被拒。
+         * 网络故障、网关返回非 JSON 造成的 -999(如 "HTTP 502"),以及 -2/-21/-88 等业务码一律不算 --
+         * 否则一次网络抖动/频控就会把本地 token 删掉,被迫重新短信登录。
+         */
+        val authFailed: Boolean get() = code == -99 || msg == "HTTP 401" || msg == "HTTP 403"
     }
 
     private fun request(

@@ -319,7 +319,7 @@ fun SettingsScreen(
                         }
                         Text(
                             if (navShape == NavBarShape.FLOATING)
-                                "液态玻璃为悬浮胶囊底栏:按住当前页签出现液态玻璃泡,可左右拖动快速切换页面(需要背景图折射,Android 13+ 效果最佳)"
+                                "液态玻璃为悬浮胶囊底栏:按住当前页签出现液态玻璃泡,可左右拖动快速切换页面(需要背景图折射,Android 13+ 效果最佳;设备不支持时自动退回高斯模糊)"
                             else "切换到悬浮形状后可选择液态玻璃",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline,

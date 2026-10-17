@@ -10,11 +10,13 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.border
@@ -109,6 +111,7 @@ fun WasherScreen(
     onBack: () -> Unit,
 ) {
     var noteTarget by remember { mutableStateOf<SavedWasher?>(null) }   // 正在改备注的设备
+    var pendingRemove by remember { mutableStateOf<String?>(null) }     // 等着确认移除的设备
     noteTarget?.let { target ->
         var text by remember(target.did) { mutableStateOf(target.note) }
         AlertDialog(
@@ -130,6 +133,31 @@ fun WasherScreen(
                 }) { Text("保存") }
             },
             dismissButton = { TextButton(onClick = { noteTarget = null }) { Text("取消") } },
+        )
+    }
+    // 「删除」原来是一点就删:同排还挨着「备注」,手滑就是设备没了。改成二次确认
+    pendingRemove?.let { did ->
+        val saved = state.savedWashers.firstOrNull { it.did == did }
+        val label = saved?.let { it.note.ifBlank { it.name.ifBlank { it.did } } } ?: did
+        AlertDialog(
+            onDismissRequest = { pendingRemove = null },
+            title = { Text("移除设备") },
+            text = {
+                Text("将从本应用移除「$label」的快捷入口。不影响 U净 里的订单与设备,之后可重新扫码添加。")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingRemove = null
+                        onRemoveWasher(did)
+                    },
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) { Text("移除") }
+            },
+            dismissButton = { TextButton(onClick = { pendingRemove = null }) { Text("取消") } },
         )
     }
     Scaffold(
@@ -293,22 +321,33 @@ fun WasherScreen(
                                                     )
                                                 }
                                             }
-                                            Text(
-                                                "备注",
-                                                fontSize = 12.sp,
-                                                color = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier
-                                                    .clickable { noteTarget = saved }
-                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                                            )
-                                            Text(
-                                                "删除",
-                                                fontSize = 12.sp,
-                                                color = MaterialTheme.colorScheme.error,
-                                                modifier = Modifier
-                                                    .clickable { onRemoveWasher(saved.did) }
-                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                                            )
+                                            // 两个动作原来只有 ~24dp 高、彼此还挨着,极易误触;
+                                            // 统一给 48dp 触控下限并留 4dp 间距
+                                            Box(
+                                                Modifier
+                                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                                    .clickable { noteTarget = saved },
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Text(
+                                                    "备注",
+                                                    fontSize = 12.sp,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                )
+                                            }
+                                            Spacer(Modifier.width(4.dp))
+                                            Box(
+                                                Modifier
+                                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                                    .clickable { pendingRemove = saved.did },
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Text(
+                                                    "删除",
+                                                    fontSize = 12.sp,
+                                                    color = MaterialTheme.colorScheme.error,
+                                                )
+                                            }
                                         }
                                         Spacer(Modifier.height(6.dp))
                                     }

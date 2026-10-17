@@ -1,6 +1,8 @@
 package com.ncepu.jw.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,6 +50,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kyant.backdrop.Backdrop
 
 /**
  * 「我的」页:分组列表样式 —— 每个分区一个圆角容器,内部多行 + 行间细分隔线,
@@ -58,6 +61,9 @@ fun ProfileScreen(
     account: String,
     name: String?,
     loggedIn: Boolean = true,
+    /** 是否有背景图:决定分组卡片的毛玻璃采样与通透度(与课表/选课页同一套) */
+    bgEnabled: Boolean = false,
+    glassBackdrop: Backdrop? = null,
     onOpenJwxtLogin: () -> Unit = {},
     onOpenSettings: () -> Unit,
     update: com.ncepu.jw.update.Updater.State? = null,
@@ -71,23 +77,33 @@ fun ProfileScreen(
     var confirmLogout by remember { mutableStateOf(false) }
     val c = MaterialTheme.colorScheme
 
-    Column(Modifier.fillMaxSize()) {
+    // 加了标题行之后内容更高,小屏上要能滚(底栏占位由 MainScaffold 的 padding 给)
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        // 页标题:与选课页「选课中心」同款(加粗 + 淡阴影),没开背景图时下面补分割线
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SectionTitle("我的")
+        }
+        if (!bgEnabled) HeaderDivider()
+
         // 更新横幅(有新版本/下载完成时显示)
         when (val u = update) {
             is com.ncepu.jw.update.Updater.State.Available -> UpdateBanner(
-                "发现新版本 v${u.info.versionName} · 点击下载", onUpdateAction)
+                "发现新版本 v${u.info.versionName} · 点击下载", onUpdateAction, bgEnabled, glassBackdrop)
             is com.ncepu.jw.update.Updater.State.Downloading -> UpdateBanner(
-                "新版本下载中 ${u.progress}%", null)
+                "新版本下载中 ${u.progress}%", null, bgEnabled, glassBackdrop)
             is com.ncepu.jw.update.Updater.State.Downloaded -> UpdateBanner(
-                "安装包已就绪 · 点击安装", onUpdateAction)
+                "安装包已就绪 · 点击安装", onUpdateAction, bgEnabled, glassBackdrop)
             else -> {}
         }
 
         SectionLabel("账号")
-        GroupCard {
+        GroupCard(bgEnabled, glassBackdrop) {
             AccountRow(name, account, loggedIn)
             if (loggedIn) {
-                RowDivider(startInset = 74.dp)
+                RowDivider()
                 GroupRow(
                     Icons.Filled.Logout, "退出登录", c.error,
                     onClick = { confirmLogout = true },
@@ -96,7 +112,7 @@ fun ProfileScreen(
         }
 
         SectionLabel("应用")
-        GroupCard {
+        GroupCard(bgEnabled, glassBackdrop) {
             if (loggedIn) {
                 GroupRow(Icons.Filled.BarChart, "成绩查询", c.primary, onOpenGrades)
                 RowDivider()
@@ -156,31 +172,26 @@ private fun SectionLabel(text: String) {
     )
 }
 
-/** 一个分区:单张圆角卡内竖排多行 */
+/** 一个分区:单张毛玻璃卡内竖排多行(材质与选课页结果卡同一套) */
 @Composable
-private fun GroupCard(content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp),
-        shape = MaterialTheme.shapes.large,
-        colors = profileCardColors(),
-    ) {
-        Column(content = content)
-    }
+private fun GroupCard(
+    bgEnabled: Boolean,
+    backdrop: Backdrop?,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    GlassCard(
+        bgEnabled = bgEnabled,
+        backdrop = backdrop,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        content = content,
+    )
 }
 
-/**
- * 行间分隔线:两端都留边(左侧缩进到本行文字起笔处,右侧对齐行的水平内边距),
- * 只缩进一边会顶到卡片圆角、看着歪。startInset 按组内实际起笔位置传:
- * 图标行 16+22+14=52,头像行 16+44+14=74。
- */
+/** 行间分隔线:通栏、不缩进,颜色与选课页结果卡内部的分割线一致 */
 @Composable
-private fun RowDivider(startInset: Dp = 52.dp) {
+private fun RowDivider() {
     HorizontalDivider(
-        Modifier.padding(start = startInset, end = 16.dp),
-        thickness = 0.6.dp,
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
     )
 }
 
@@ -273,15 +284,19 @@ fun profileCardColors(): CardColors = CardDefaults.cardColors(
 )
 
 @Composable
-private fun UpdateBanner(text: String, onClick: (() -> Unit)?) {
-    Card(
-        onClick = { onClick?.invoke() },
-        enabled = onClick != null,
+private fun UpdateBanner(
+    text: String,
+    onClick: (() -> Unit)?,
+    bgEnabled: Boolean,
+    backdrop: Backdrop?,
+) {
+    GlassCard(
+        bgEnabled = bgEnabled,
+        backdrop = backdrop,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        shape = MaterialTheme.shapes.large,
-        colors = profileCardColors(),
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier),
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),

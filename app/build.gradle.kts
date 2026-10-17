@@ -65,6 +65,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    // 顶栏文字/图标颜色:开了背景图时用官方 Palette 从图片顶部区域求代表色(见 ui/HeaderPalette.kt)
+    implementation("androidx.palette:palette-ktx:1.0.0")
     implementation("androidx.navigation:navigation-compose:2.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.materialkolor:material-kolor:2.0.0")

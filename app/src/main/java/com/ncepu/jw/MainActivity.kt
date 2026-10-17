@@ -37,6 +37,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -55,13 +57,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
@@ -69,7 +71,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import com.kyant.backdrop.backdrops.layerBackdrop
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
@@ -96,18 +100,25 @@ import com.ncepu.jw.data.ThemeMode
 import com.ncepu.jw.reminder.ReminderScheduler
 import com.ncepu.jw.ui.AboutScreen
 import com.ncepu.jw.ui.AppBottomBar
+import com.ncepu.jw.ui.LocalBottomBarInset
+import com.ncepu.jw.ui.LocalHeaderContentColor
+import com.ncepu.jw.ui.LocalHeaderPalette
 import com.ncepu.jw.ui.BackgroundCropScreen
 import com.ncepu.jw.ui.ExamScreen
 import com.ncepu.jw.ui.GradeScreen
 import com.ncepu.jw.ui.LoginScreen
 import com.ncepu.jw.ui.ProfileScreen
 import com.ncepu.jw.ui.PyfaScreen
+import com.ncepu.jw.ui.QrScanRouter
+import com.ncepu.jw.ui.ScanTarget
 import com.ncepu.jw.ui.ScheduleScreen
 import com.ncepu.jw.ui.SelectionScreen
 import com.ncepu.jw.ui.SettingsScreen
 import com.ncepu.jw.ui.WaterScreen
 import com.ncepu.jw.ui.WaterScanScreen
 import com.ncepu.jw.ui.WaterDeviceIdParser
+import com.ncepu.jw.ui.HEADER_BAND_BOTTOM
+import com.ncepu.jw.ui.HeaderPaletteSampler
 import com.ncepu.jw.ui.WasherScreen
 import com.ncepu.jw.ui.WasherUiState
 import com.ncepu.jw.ui.WaterUiState
@@ -176,7 +187,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var schedError by mutableStateOf<String?>(null)
     var allCourses by mutableStateOf<List<Course>>(emptyList())  // 学期全量(xskb_list.do)
     var courses by mutableStateOf<List<Course>>(emptyList())     // 当前显示(周视图=本地过滤)
-    var schedMode by mutableStateOf("WEEK")      // WEEK=周视图(本地过滤) / ALL=学期全量
     var officialWeek by mutableStateOf(0)        // 官方当前周(教务系统计算,加载时取一次)
     // 注意:以下状态必须在 init 之前声明(Kotlin 按声明顺序初始化,
     // init/其协程会读写它们;声明在 init 之后会导致启动期 NPE 崩溃)
@@ -189,7 +199,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var updatePrompt by mutableStateOf(false)   // 更新提醒弹窗开关
     var updateTargetName by mutableStateOf("") // 目标版本名(下载中展示)
     private var updatePendingInfo: com.ncepu.jw.update.Updater.Info? = null // 供下载失败重试
-    var selectedWeek by mutableStateOf(0)        // 当前查看的周
     var schedLoaded by mutableStateOf(false)
 
     var gradeSem by mutableStateOf(Semester.current())
@@ -235,6 +244,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var waterCaptchaInput by mutableStateOf("")
     var waterSmsCooldown by mutableStateOf(0)    // 短信发送冷却(秒)
     var waterScanResult by mutableStateOf<String?>(null)
+
+    /** 每次"扫码命中饮水机"自增一次:同一台设备重复扫时 waterScanResult 的值没变,靠它重新触发定位 */
+    var waterScanTick by mutableStateOf(0)
+
+    /** 统一扫码分流拿不准时的原始码(非空则弹"饮水机 / 洗衣机"选择框,见 ScanTargetDialog) */
+    var scanPendingRaw by mutableStateOf<String?>(null)
     private var waterToken by mutableStateOf("")
     private var waterCaptchaKey = IlifeClient.newCaptchaKey()
     var skippedLogin by mutableStateOf(false)   // 跳过教务登录(离线/仅用饮水机)
@@ -281,6 +296,23 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         settings.addWaterDevice(did, name)
         waterScanResult = null
         loadWaterDevices()
+    }
+
+    /**
+     * 记录一次"扫码命中饮水机"的编号(归一化后),并让 waterScanTick 自增。
+     * 重复扫同一台也要能重新定位,所以三处扫码出口都走这里,不要直接写 waterScanResult。
+     */
+    fun setWaterScan(raw: String) {
+        waterScanResult = WaterDeviceIdParser.normalize(raw)
+        waterScanTick++
+    }
+
+    /**
+     * 饮水页处理完扫码信号后回调。扫码是"一次性事件":不清掉的话,离开饮水页再回来时
+     * LaunchedEffect 会拿着同一个 waterScanResult 重跑,设备被重复高亮 / 添加框被重复弹出。
+     */
+    fun consumeWaterScan() {
+        waterScanResult = null
     }
 
     fun removeWaterDevice(did: String) {
@@ -367,15 +399,19 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 // 账号状态刷新:view-info 验证 token(设备平台 1,1)
                 val check = ilife.viewInfo(waterToken)
                 if (!check.ok) {
-                    settings.waterToken = ""
-                    waterToken = ""
-                    waterState = waterState.copy(
-                        loggedIn = false,
-                        loading = false,
-                        devices = emptyList(),
-                        message = "登录已过期,请重新登录",
-                    )
-                    refreshCaptcha()
+                    if (check.authFailed) {
+                        expireWaterLogin()
+                    } else {
+                        // 网络故障/网关页/业务码:保留 token,只提示,避免误判过期把登录态删掉
+                        waterState = waterState.copy(
+                            loading = false,
+                            message = if (check.code == -999) {
+                                "网络异常(${check.msg}),请检查网络后重试"
+                            } else {
+                                "服务暂时不可用:" + IlifeClient.readable(check.code, check.msg)
+                            },
+                        )
+                    }
                     return@launch
                 }
                 val accountName = check.json?.optJSONObject("data")?.let { d ->
@@ -407,6 +443,22 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 waterState = waterState.copy(loading = false, message = "加载失败:${e.message}")
             }
         }
+    }
+
+    /**
+     * 服务端确认 token 失效(authFailed)时才调用:清本地登录态并回到登录页。
+     * 非鉴权失败(网络抖动/频控/网关页)一律走上面的提示分支,不动 token。
+     */
+    private fun expireWaterLogin() {
+        settings.waterToken = ""
+        waterToken = ""
+        waterState = waterState.copy(
+            loggedIn = false,
+            loading = false,
+            devices = emptyList(),
+            message = "登录已过期,请重新登录",
+        )
+        refreshCaptcha()
     }
 
     fun washerRequestCaptcha() {
@@ -602,8 +654,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         if (enabled) {
             // 立即应用导入的数据
             fallBackToCache()
-            schedMode = "WEEK"
-            if (selectedWeek <= 0) selectedWeek = officialWeek.coerceAtLeast(1)
         } else if (loggedIn) {
             loadSchedule(force = true)  // 关闭导入,恢复联网获取
         }
@@ -954,6 +1004,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     } else {
                         setWaterRunning(did, false)
                         waterState = waterState.copy(message = "启动失败:${IlifeClient.readableDevice(r.code, r.msg)}")
+                        // 真过期才清登录态回到登录页;频控/需人机验证/上一笔未结束等只提示
+                        if (r.authFailed) expireWaterLogin()
                     }
                 } else {
                     val r = ilife.end(waterToken, did)
@@ -1140,8 +1192,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
      */
     fun loadSchedule(force: Boolean = false, silent: Boolean = false) {
         if (schedLoaded && !force) {
-            schedMode = "WEEK"
-            selectedWeek = officialWeek
             courses = allCourses
             return
         }
@@ -1192,7 +1242,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 val xlsDays = xls?.map { it.day }?.distinct()?.size ?: 0
                 val htmlDays = html?.map { it.day }?.distinct()?.size ?: 0
                 val full = if (htmlDays > xlsDays) html!! else xls ?: html!!
-                val hadShown = schedLoaded
                 allCourses = full
                 courses = full
                 schedLoaded = true
@@ -1205,8 +1254,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 // 官方当前周:周四锚定(与三请求并发);拿不到则本地推断
                 officialWeek = weekDef.await() ?: localCurrentWeek()
                 // 已有界面在显示时(静默刷新)保留用户所在周,否则跳到当前周
-                selectedWeek = if (hadShown) selectedWeek.coerceIn(1, 25) else officialWeek
-                schedMode = "WEEK"
                 if (settings.reminderEnabled) {
                     ReminderScheduler.reschedule(getApplication())
                 }
@@ -1341,7 +1388,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         schedError = null
         schedDiag = ""
         if (officialWeek <= 0) officialWeek = localCurrentWeek()
-        if (selectedWeek <= 0) selectedWeek = officialWeek
         return true
     }
 
@@ -1354,28 +1400,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         cal.add(Calendar.DAY_OF_MONTH, -((dow + 5) % 7)) // 本周一
         cal.add(Calendar.DAY_OF_MONTH, 3)                 // 周四
         return java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(cal.time)
-    }
-
-    /** 切换查看的周:纯本地过滤,瞬时完成 */
-    fun selectWeek(week: Int) {
-        selectedWeek = week.coerceIn(1, 25)
-        schedMode = "WEEK"
-    }
-
-    fun showAllSemester() {
-        schedMode = "ALL"
-        selectedWeek = 0
-    }
-
-    fun backToCurrentWeek() {
-        schedMode = "WEEK"
-        selectedWeek = officialWeek.coerceAtLeast(1)
-    }
-
-    fun changeSemester(sem: Semester) {
-        schedSem = sem
-        settings.scheduleSource = "AUTO"  // 切学期重新联网获取
-        loadSchedule(force = true)
     }
 
     /** 手动导入课表 XLS(教务"打印课表"导出的 .xls);导入后不再自动刷新 */
@@ -1395,9 +1419,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 courses = parsed
                 schedLoaded = true
                 schedError = null
-                schedMode = "WEEK"
                 if (officialWeek <= 0) officialWeek = localCurrentWeek()
-                selectedWeek = officialWeek
                 settings.scheduleSource = "MANUAL"
                 settings.cacheCourses(parsed)
                 com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(getApplication())
@@ -1605,12 +1627,17 @@ class MainActivity : ComponentActivity() {
         val ctx = LocalContext.current
         val navController = rememberNavController()
 
-        // 状态栏图标颜色跟随主题
+        // 系统栏图标明暗跟随主题。状态栏和导航栏是一对:
+        // 应用是 edge-to-edge(见 setDecorFitsSystemWindows(window, false)),
+        // 导航栏底色由应用内容透出,但图标颜色必须显式声明——
+        // 漏掉它,浅色主题下三键导航会是白图标压浅底、手势导航是白手势条压浅底
         val isDarkNow = themeMode == ThemeMode.DARK ||
             (themeMode == ThemeMode.SYSTEM && isSystemInDarkTheme())
         LaunchedEffect(isDarkNow) {
-            WindowCompat.getInsetsController(window, window.decorView)
-                .isAppearanceLightStatusBars = !isDarkNow
+            WindowCompat.getInsetsController(window, window.decorView).apply {
+                isAppearanceLightStatusBars = !isDarkNow
+                isAppearanceLightNavigationBars = !isDarkNow
+            }
         }
 
         LaunchedEffect(Unit) {
@@ -1708,6 +1735,7 @@ class MainActivity : ComponentActivity() {
                             onOpenWaterScan = { navController.navigate("waterscan") },
                             onOpenWasher = { navController.navigate("washer") },
                             onOpenWasherScan = { navController.navigate("washerscan") },
+                            onOpenScan = { navController.navigate("scan") },
                             onOpenJwxtLogin = { navController.navigate("login") },
                             onOpenGradesNav = {
                                 if (!vm.loggedIn) navController.navigate("login")
@@ -1754,8 +1782,8 @@ class MainActivity : ComponentActivity() {
                     composable("waterscan") {
                         WaterScanScreen(
                             onResult = { raw ->
-                                // 从二维码内容提取 did,回填到添加对话框状态
-                                vm.waterScanResult = WaterDeviceIdParser.normalize(raw)
+                                // 解析二维码里的设备编号(列表里已有这台就定位到它,否则回填添加框)
+                                vm.setWaterScan(raw)
                                 navController.popBackStack()
                             },
                             onCancel = { navController.popBackStack() },
@@ -1816,6 +1844,13 @@ class MainActivity : ComponentActivity() {
                                 vm.washerScan(raw)
                                 navController.popBackStack()
                             },
+                            onCancel = { navController.popBackStack() },
+                        )
+                    }
+                    // 统一扫码入口:按扫到的码自动分流到洗衣机/饮水机
+                    composable("scan") {
+                        WaterScanScreen(
+                            onResult = { raw -> routeScan(raw, vm, navController) },
                             onCancel = { navController.popBackStack() },
                         )
                     }
@@ -1999,6 +2034,7 @@ class MainActivity : ComponentActivity() {
                 }
         UpdateDialog(vm)
         WebvpnSmsDialog(vm)
+        ScanTargetDialog(vm) { navController.navigate("washer") }
     }
 
     /** 统一认证短信 MFA 输入框(校内直连与校外隧道登录共用;密码通过后挂起等待) */
@@ -2006,6 +2042,9 @@ class MainActivity : ComponentActivity() {
     private fun WebvpnSmsDialog(vm: AppViewModel) {
         if (!vm.smsPrompt) return
         var code by androidx.compose.runtime.remember { mutableStateOf("") }
+        // 在途保护:登录要过隧道 + 统一认证,这几秒里按钮必须锁住,
+        // 连点会把同一个验证码重复提交(服务端一般直接作废)
+        var sent by androidx.compose.runtime.remember { mutableStateOf(false) }
         AlertDialog(
             // 防呆:点外部/返回不关闭(避免手滑作废已发的验证码),只能"登录"或"取消"
             onDismissRequest = { },
@@ -2029,9 +2068,55 @@ class MainActivity : ComponentActivity() {
                 }
             },
             confirmButton = {
-                Button(onClick = { vm.submitSms(code) }, enabled = code.length == 6) { Text("登录") }
+                Button(
+                    onClick = {
+                        sent = true
+                        vm.submitSms(code)
+                    },
+                    enabled = code.length == 6 && !sent,
+                ) { Text(if (sent) "登录中…" else "登录") }
             },
             dismissButton = { TextButton(onClick = { vm.cancelSms() }) { Text("取消并重新登录") } },
+        )
+    }
+
+    /**
+     * 统一扫码分流拿不准时(见 QrScanRouter.route → ScanTarget.Ambiguous):
+     * 不猜页面,让用户点一次 —— 扫饮水机跳洗衣机页就是这么来的。
+     */
+    @Composable
+    private fun ScanTargetDialog(vm: AppViewModel, onOpenWasher: () -> Unit) {
+        val raw = vm.scanPendingRaw ?: return
+        AlertDialog(
+            onDismissRequest = { vm.scanPendingRaw = null },
+            title = { Text("这是哪种设备?") },
+            text = {
+                androidx.compose.foundation.layout.Column {
+                    Text("这个码认不出是饮水机还是洗衣机,你选一下,我进对应页面:")
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        raw,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val code = raw
+                    vm.scanPendingRaw = null
+                    vm.setWaterScan(code)
+                    vm.pendingTab = 1
+                }) { Text("饮水机") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    val code = raw
+                    vm.scanPendingRaw = null
+                    vm.washerScan(code)
+                    onOpenWasher()
+                }) { Text("洗衣机 / 烘干机") }
+            },
         )
     }
 
@@ -2115,18 +2200,60 @@ class MainActivity : ComponentActivity() {
         return am.canScheduleExactAlarms()
     }
 
-    /** 解析本地背景图(采样,避免大图 OOM) */
-    private fun loadBgBitmap(file: java.io.File): ImageBitmap? = runCatching {
+    /**
+     * 解析本地背景图(采样,避免大图 OOM)。
+     * 返回全 App 唯一的一份 android Bitmap:ImageView 显示、Palette 取色、玻璃折射层共用同一份像素,
+     * 需要 ImageBitmap 时用 asImageBitmap() 取零拷贝视图,不再逐处 asAndroidBitmap() 复制。
+     */
+    private fun loadBgBitmap(file: java.io.File): android.graphics.Bitmap? = runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.absolutePath, bounds)
         var sample = 1
         while (bounds.outWidth / (sample * 2) >= 480) sample *= 2
-        val bmp = BitmapFactory.decodeFile(
+        BitmapFactory.decodeFile(
             file.absolutePath,
             BitmapFactory.Options().apply { inSampleSize = sample },
-        ) ?: return null
-        bmp.asImageBitmap()
+        )
     }.getOrNull()
+
+    /**
+     * 统一扫码分流(见 QrScanRouter):
+     * 饮水机 → 切到饮水 tab 并回填 did 弹添加框;其余 → 洗衣机链路(码由厂商服务端判)。
+     */
+    private fun routeScan(raw: String, vm: AppViewModel, nav: androidx.navigation.NavHostController) {
+        when (val target = QrScanRouter.route(raw)) {
+            is ScanTarget.Water -> {
+                vm.setWaterScan(target.did)
+                vm.pendingTab = 1
+                nav.popBackStack()
+            }
+            is ScanTarget.Washer -> {
+                vm.washerScan(target.raw)
+                // 扫码页不留在返回栈里(从洗衣机页退回不该回到相机)
+                nav.navigate("washer") { popUpTo("scan") { inclusive = true } }
+            }
+            is ScanTarget.Ambiguous -> {
+                // 本地认不出是饮水机还是洗衣机:不猜(猜错就是跳错页),退出相机后弹一次选择
+                vm.scanPendingRaw = target.raw
+                nav.popBackStack()
+            }
+            is ScanTarget.Unknown -> {
+                copyToClipboard(target.raw, "无法识别的二维码,内容已复制")
+                nav.popBackStack()
+            }
+        }
+    }
+
+    /** 复制到剪贴板并提示(扫码结果兜底:用户可自行粘到别处) */
+    private fun copyToClipboard(text: String, toast: String) {
+        try {
+            val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("二维码", text))
+            android.widget.Toast.makeText(this, toast, android.widget.Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            android.widget.Toast.makeText(this, "复制失败:${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
 
     @Composable
     private fun MainScaffold(
@@ -2139,6 +2266,7 @@ class MainActivity : ComponentActivity() {
         onOpenWaterScan: () -> Unit,
         onOpenWasherScan: () -> Unit,
         onOpenWasher: () -> Unit,
+        onOpenScan: () -> Unit,
         onOpenJwxtLogin: () -> Unit,
         onOpenGradesNav: () -> Unit,
         onOpenAbout: () -> Unit,
@@ -2173,11 +2301,16 @@ class MainActivity : ComponentActivity() {
         }
         // 液态玻璃折射源:背景图的 Compose 隐形副本(仅进入 backdrop 采样层,不参与显示)
         val glassBackdrop = com.kyant.backdrop.backdrops.rememberLayerBackdrop()
-        var bgBmp by remember(appearance.bgHas, appearance.bgVersion) {
-            mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+        // 唯一一份像素:解码得到的 android Bitmap。显示/取色/折射层都复用它,
+        // ImageBitmap 只是零拷贝视图(旧实现每处 asAndroidBitmap() 各拷一份,1080×2400 一张就 ~10MB)
+        var bgBitmap by remember(appearance.bgHas, appearance.bgVersion) {
+            mutableStateOf<android.graphics.Bitmap?>(null)
         }
+        val bgBmp: ImageBitmap? = remember(bgBitmap) { bgBitmap?.asImageBitmap() }
 
-        remember(showBg) {
+        // View 树的挂载/卸载是副作用:写在 remember 初始化块里不可取消、也没有回滚,
+        // 换成 DisposableEffect 后随 showBg 变化正确地重挂,离开组合时清空宿主
+        DisposableEffect(bgHost, bgImageView, showBg) {
             bgHost.removeAllViews()
             bgHost.foreground = if (showBg) dimDrawable else null
             if (showBg) {
@@ -2189,21 +2322,41 @@ class MainActivity : ComponentActivity() {
                     ),
                 )
             }
-            true
+            onDispose { bgHost.removeAllViews() }
         }
         val densityValue = LocalDensity.current.density
         // 解码只依赖背景图本身;调模糊滑杆不再从磁盘重解 bitmap
         LaunchedEffect(appearance.bgHas, appearance.bgVersion) {
             if (!appearance.bgHas) {
                 bgImageView.setImageDrawable(null)
+                bgBitmap = null
                 return@LaunchedEffect
             }
             val bmp = withContext(Dispatchers.IO) {
                 vm.settings.backgroundFile()?.let { loadBgBitmap(it) }
             }
-            bgImageView.setImageBitmap(bmp?.asAndroidBitmap())
-            bgBmp = bmp
+            // 直接交给 ImageView(不复制):后续 Palette、折射层都读同一份
+            bgImageView.setImageBitmap(bmp)
+            bgBitmap = bmp
         }
+
+        // 顶栏(左上角标题 / 右上角图标)颜色:开了背景图就用 Palette 从图片顶部一条算一个最易辨识的颜色。
+        // 必须把 App 自己叠在图片上方的压暗层算进去(背景图 dim + 顶部 scrim),
+        // 否则原图很亮、实际看起来被压得很暗时会算出黑字,直接糊在深色背景上。
+        // 同一个 sampler 下发下去,内容区标题("我的设备"/"我的选课结果")再按各自高度带各判一次色。
+        val headerSampler = remember(bgBitmap, showBg, appearance.bgDim) {
+            if (!showBg) null else bgBitmap?.let {
+                HeaderPaletteSampler(it, appearance.bgDim)
+            }
+        }
+        var headerTextColor by remember { mutableStateOf<androidx.compose.ui.graphics.Color?>(null) }
+        LaunchedEffect(headerSampler) {
+            headerTextColor = headerSampler?.let { sampler ->
+                withContext(Dispatchers.Default) { sampler.colorFor(0f, HEADER_BAND_BOTTOM) }
+            }
+        }
+        // 没开背景图(或图还没解完)时给 null,下游退回主题色
+        val headerContentColor = if (showBg) headerTextColor else null
         // 模糊只重设 RenderEffect,与解码解耦
         LaunchedEffect(appearance.bgHas, appearance.bgBlur, densityValue) {
             applyBackgroundBlur(bgImageView, if (appearance.bgHas) appearance.bgBlur else 0f, densityValue)
@@ -2211,6 +2364,12 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(appearance.bgDim, appearance.bgVersion) {
             dimDrawable.alpha = (appearance.bgDim.coerceIn(0f, 0.85f) * 255).toInt()
         }
+
+        // 悬浮底栏是浮在内容上方的:量出底栏实高,交给可滚动页面自己留底部空白,
+        // 内容就能铺到屏幕底、从底栏玻璃下面穿过(否则底栏上方会留一条空白带)
+        val barOverlaysContent = appearance.navShape == NavBarShape.FLOATING
+        var bottomBarPx by remember { mutableStateOf(0) }
+        val bottomBarInset = with(LocalDensity.current) { bottomBarPx.toDp() }
 
         Box(Modifier.fillMaxSize()) {
             // 背景容器(最底层)
@@ -2262,6 +2421,7 @@ class MainActivity : ComponentActivity() {
                             androidx.compose.animation.slideOutVertically(tween(200)) { it },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
+                    Box(Modifier.fillMaxWidth().onSizeChanged { bottomBarPx = it.height }) {
                     AppBottomBar(
                         shape = appearance.navShape,
                         material = appearance.navMaterial,
@@ -2278,9 +2438,25 @@ class MainActivity : ComponentActivity() {
                         backdrop = glassBackdrop,
                     )
                     }
+                    }
                 },
             ) { padding ->
-                Box(Modifier.padding(padding).fillMaxSize()) {
+                // 底栏预留不再挂在这一层,而是塞进每个页面自己的壳里(见下面 AnimatedContent):
+                // 这一层的尺寸因此与 tab 无关,切换时不会变高变矮
+                Box(
+                    Modifier
+                        .padding(
+                            start = padding.calculateStartPadding(LocalLayoutDirection.current),
+                            top = padding.calculateTopPadding(),
+                            end = padding.calculateEndPadding(LocalLayoutDirection.current),
+                        )
+                        .fillMaxSize(),
+                ) {
+                    CompositionLocalProvider(
+                        LocalBottomBarInset provides bottomBarInset,
+                        LocalHeaderContentColor provides headerContentColor,
+                        LocalHeaderPalette provides headerSampler,
+                    ) {
                     AnimatedContent(
                         targetState = tab,
                         transitionSpec = {
@@ -2293,28 +2469,33 @@ class MainActivity : ComponentActivity() {
                                     slideOutOfContainer(dir, tween(280), targetOffset = { -it / 12 })
                                         + fadeOut(tween(200))
                                 )
+                                // 两个状态的容器都是整屏的壳,尺寸一致,所以这里不需要 SizeTransform:
+                                // 既不会逐帧重排内容(像"斜着滑进中间"),也不会把原页面压矮(像"向上抖")
                         },
                         label = "tab",
                     ) { t ->
+                        // 浮动态下饮水页/选课页的列表自己能滚,不预留整块底部空档,内容从底栏玻璃下面穿过;
+                        // 课表页是按高度自适应的网格、我的页不可滚动,吃掉底栏预留的高度。
+                        // 这层壳始终 fillMaxSize,保证 AnimatedContent 两个状态尺寸一致。
+                        val reserveBarSpace = !(barOverlaysContent && (t == 1 || t == 2))
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .padding(bottom = if (reserveBarSpace) padding.calculateBottomPadding() else 0.dp),
+                        ) {
                         when (t) {
                             0 -> ScheduleScreen(
                                 loading = vm.schedLoading,
                                 error = vm.schedError,
                                 allCourses = vm.allCourses,
                                 diag = vm.schedDiag,
-                                mode = vm.schedMode,
                                 weekStartMillis = appearance.weekStartMillis,
                                 officialWeek = vm.officialWeek,
-                                semesters = vm.semesters,
-                                selected = vm.schedSem,
                                 sectionTimes = vm.settings.sectionTimes,
                                 bgEnabled = showBg,
                                 glassBackdrop = glassBackdrop,
-                                onSelectWeek = { vm.selectWeek(it) },
-                                onShowAll = { vm.showAllSemester() },
-                                onBackToWeek = { vm.backToCurrentWeek() },
-                                onSemesterChange = { vm.changeSemester(it) },
                                 onRetry = { vm.loadSchedule(force = true) },
+                                onScan = onOpenScan,
                                 onRefresh = { vm.loadSchedule(force = true) },
                                 onOpenExams = onOpenExams,
                             )
@@ -2338,6 +2519,10 @@ class MainActivity : ComponentActivity() {
                                 onReorder = { from, to -> vm.moveWaterDevice(from, to) },
                                 onScan = onOpenWaterScan,
                                 scanResult = vm.waterScanResult,
+                                scanTick = vm.waterScanTick,
+                                onScanConsumed = { vm.consumeWaterScan() },
+                                bgEnabled = showBg,
+                                glassBackdrop = glassBackdrop,
                         onDragActiveChange = { waterDragging = it },
                             )
                             2 -> SelectionScreen(
@@ -2346,6 +2531,9 @@ class MainActivity : ComponentActivity() {
                                 error = vm.selError,
                                 rounds = vm.xkRounds,
                                 courses = vm.selectedCourses,
+                                bgEnabled = showBg,
+                                glassBackdrop = glassBackdrop,
+                                onOpenLogin = onOpenJwxtLogin,
                                 onEnterRound = onEnterRound,
                                 onRetry = { vm.loadSelection() },
                             )
@@ -2353,6 +2541,8 @@ class MainActivity : ComponentActivity() {
                                 account = vm.account,
                                 name = vm.name,
                                 loggedIn = vm.loggedIn,
+                                bgEnabled = showBg,
+                                glassBackdrop = glassBackdrop,
                                 update = vm.updateState,
                                 onUpdateAction = { vm.onUpdateAction() },
                                 onOpenJwxtLogin = onOpenJwxtLogin,
@@ -2367,6 +2557,8 @@ class MainActivity : ComponentActivity() {
                                 },
                             )
                         }
+                        }
+                    }
                     }
                 }
             }

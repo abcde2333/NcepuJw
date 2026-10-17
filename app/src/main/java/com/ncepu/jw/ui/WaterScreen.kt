@@ -22,6 +22,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,10 +43,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.AddCircleOutline
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.QrCodeScanner
@@ -59,6 +61,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import com.kyant.backdrop.Backdrop
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -79,6 +82,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
@@ -101,6 +105,7 @@ import com.ncepu.jw.data.Course
 private const val BOTTOM_BAR_EXIT_MS = 220L   // 与 MainActivity 底栏 exit 动画时长对齐
 private const val DELETE_BAR_EXIT_MS = 200     // 删除条退场时长,须与下方 exit 里的 tween 一致
 private const val BURST_MS = 1100              // 开水成功动效时长
+private const val FOCUS_HIGHLIGHT_MS = 3000L   // 扫码定位后高亮保持时长
 
 /** 饮水机数据(由 MainActivity 传入的状态) */
 data class WaterUiState(
@@ -139,11 +144,27 @@ fun WaterScreen(
     onReorder: (Int, Int) -> Unit = { _, _ -> },
     onScan: () -> Unit,
     scanResult: String? = null,
+    /** 扫码命中序号:同一台设备重复扫也要重新定位(见 AppViewModel.setWaterScan) */
+    scanTick: Int = 0,
+    /**
+     * 扫码信号处理完的回调:调用方应清掉 VM 里的待处理扫码(一次性信号)。
+     * 不清的话,离开饮水页再回来 LaunchedEffect 会拿着同一个 scanResult 重跑,设备又被高亮一次。
+     */
+    onScanConsumed: () -> Unit = {},
     /** 拖拽设备卡片时通知外层收起底栏,给底部删除条腾位置 */
     onDragActiveChange: (Boolean) -> Unit = {},
+    /** 是否有背景图:决定设备卡片的毛玻璃采样与通透度(与课表/选课页同一套) */
+    bgEnabled: Boolean = false,
+    glassBackdrop: Backdrop? = null,
     onBack: (() -> Unit)? = null,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
+    // 待添加的设备编号(扫码带过来的)。不放 VM:VM 里的扫码信号是一次性的,处理完就清
+    var addDid by remember { mutableStateOf<String?>(null) }
+    // 设备列表的滚动状态提到这里:扫码命中已有设备时要滚到那一张(见下面的 focusedDid)
+    val deviceListState = rememberLazyListState()
+    // 扫码命中列表里已有的设备时高亮那一张,FOCUS_HIGHLIGHT_MS 后自动褪去
+    var focusedDid by remember { mutableStateOf<String?>(null) }
     // 拖到删除条松手后先弹确认:拖拽误操作比点击更常见
     var pendingRemove by remember { mutableStateOf<String?>(null) }
     var draggingDid by remember { mutableStateOf<String?>(null) }
@@ -167,16 +188,52 @@ fun WaterScreen(
             onDragActiveChange(false)
         }
     }
-    // 扫码返回:自动弹出添加对话框并回填设备编号
-    LaunchedEffect(scanResult) {
-        if (!scanResult.isNullOrBlank()) showAddDialog = true
+    // 扫码返回:列表里已经有这台 → 不弹添加框,直接滚到它并高亮(重复码再问一次"添加"很多余);
+    // 列表里没有 → 照旧弹添加对话框并回填设备编号。
+    // 键里带 scanTick:同一台设备连扫两次时 scanResult 的值没变,靠它重新触发定位。
+    LaunchedEffect(scanResult, scanTick) {
+        val code = scanResult?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        if (state.devices.any { it.first == code }) {
+            focusedDid = code
+        } else {
+            addDid = code
+            showAddDialog = true
+        }
+        // 一次性信号:处理完就让 VM 清掉。否则离开饮水页再回来,effect 会拿同一个 scanResult
+        // 重跑一遍 —— 设备被重复高亮、添加框被重复弹出,都是这么来的
+        onScanConsumed()
+    }
+    // 定位:滚到那一张(带回弹动画),高亮一段时间后自动褪去
+    LaunchedEffect(focusedDid) {
+        val did = focusedDid ?: return@LaunchedEffect
+        state.devices.indexOfFirst { it.first == did }
+            .takeIf { it >= 0 }
+            ?.let { deviceListState.animateScrollToItem(it) }
+        kotlinx.coroutines.delay(FOCUS_HIGHLIGHT_MS)
+        focusedDid = null
     }
     // 透明 Scaffold/顶栏:底栏 tab 内嵌时透出自定义背景
     Scaffold(
         containerColor = Color.Transparent,
         topBar = {
+            // 开了背景图时顶栏颜色由 Palette 定(见 HeaderPalette):标题、返回键、右上角图标一起跟着走
+            val headerColor = LocalHeaderContentColor.current
             TopAppBar(
-                title = { Text("饮水机") },
+                // 与选课页 SectionTitle 同款:加粗 + 一道很淡的文字阴影,背景图花哨时也不会被吃掉
+                title = {
+                    Text(
+                        "饮水机",
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            shadow = Shadow(
+                                color = headerHaloColor(headerColor),
+                                offset = Offset(0f, 1.5f),
+                                blurRadius = 6f,
+                            ),
+                        ),
+                        fontWeight = FontWeight.Bold,
+                        color = headerColor ?: MaterialTheme.colorScheme.onSurface,
+                    )
+                },
                 navigationIcon = {
                     if (onBack != null) {
                         IconButton(onClick = onBack) {
@@ -184,9 +241,46 @@ fun WaterScreen(
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Transparent,
-                ),
+                // 与课表页右上角同款:图标在上、文字在下,点整块区域都能触发。
+                // 刻意不给 tint:让图标取当前内容色,HeaderIconAction 的深色阴影副本才会跟着变深。
+                // 登录页(未登录时)不显示这两个动作:还没登录时没有设备列表可刷,也扫不了设备
+                actions = {
+                    if (state.loggedIn) {
+                        HeaderIconAction(
+                            label = "扫码",
+                            onClick = onScan,
+                            enabled = !state.loading,
+                        ) {
+                            Icon(
+                                Icons.Filled.QrCodeScanner,
+                                contentDescription = "扫码添加设备",
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                        HeaderIconAction(
+                            label = "刷新",
+                            onClick = onRefreshDevices,
+                            enabled = !state.loading,
+                        ) {
+                            Icon(
+                                Icons.Filled.Refresh,
+                                contentDescription = "刷新设备列表",
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                    }
+                },
+                // 只有开了背景图(headerColor != null)时才接管颜色,其余情况保持 Material 默认值
+                colors = if (headerColor != null) {
+                    TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color.Transparent,
+                        titleContentColor = headerColor,
+                        actionIconContentColor = headerColor,
+                        navigationIconContentColor = headerColor,
+                    )
+                } else {
+                    TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+                },
             )
         },
     ) { padding ->
@@ -205,13 +299,26 @@ fun WaterScreen(
                 }
             }) {
         Column(Modifier.fillMaxSize()) {
+            // 与选课页一致:没开背景图时,标题下补一道分割线
+            if (!bgEnabled) HeaderDivider()
             if (!state.loggedIn) {
                 // ---------- 登录 ----------
+                // 登录表单也做成液态玻璃卡片:垫在背景图上折射 + 透镜边缘,和悬浮底栏同一套配方;
+                // 没开背景图时 glassSurface 会退回普通衬底(没有可折射的东西)
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp)
-                        .padding(top = 12.dp),
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 14.dp)
+                        .padding(top = 12.dp)
+                        .padding(bottom = LocalBottomBarInset.current + 12.dp)
+                        .glassSurface(
+                            bgEnabled = bgEnabled,
+                            backdrop = glassBackdrop,
+                            shape = CardShape,
+                            liquid = true,
+                        )
+                        .padding(16.dp),
                 ) {
                     OutlinedTextField(
                         value = phone,
@@ -308,40 +415,26 @@ fun WaterScreen(
             } else {
                 // ---------- 设备列表 ----------
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    // 层级:顶栏「饮水机」= titleLarge(页面标题),这里「我的设备」降到 titleMedium(区块标题)。
+                    // 间距只走 4/24:段与段之间 24dp(顶栏 -> 我的设备),同段内 4dp(我的设备 -> 提示 / 提示 -> 列表)
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 24.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("我的设备", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.weight(1f))
-                    // 图标都取"一看就懂"的形:扫码框 / 加号圆 / 环形箭头,并保留 contentDescription
-                    IconButton(onClick = onScan, enabled = !state.loading) {
-                        Icon(
-                            Icons.Filled.QrCodeScanner,
-                            contentDescription = "扫码添加设备",
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                    IconButton(onClick = { showAddDialog = true }, enabled = !state.loading) {
-                        Icon(
-                            Icons.Filled.AddCircleOutline,
-                            contentDescription = "手动添加设备",
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                    IconButton(onClick = onRefreshDevices, enabled = !state.loading) {
-                        Icon(
-                            Icons.Filled.Refresh,
-                            contentDescription = "刷新设备列表",
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                    }
+                    // 阴影与选课页 SectionTitle 同款(淡阴影);扫码/刷新已挪到顶栏。
+                    // 颜色按这一行自己所在的高度带(顶栏正下方)从背景图判,顶部 scrim 到这里还没完全散掉
+                    SectionTitle(
+                        "我的设备",
+                        color = rememberSectionTextColor(0.05f, 0.16f),
+                        style = MaterialTheme.typography.titleMedium,
+                        weight = FontWeight.SemiBold,
+                    )
                 }
                 if (state.devices.size > 1) {
                     Text(
                         "长按卡片可拖动排序;拖到屏幕底部红色区域可删除",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.padding(horizontal = 16.dp),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                 }
                 state.message?.let {
@@ -349,7 +442,7 @@ fun WaterScreen(
                         it,
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(horizontal = 16.dp),
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp),
                     )
                 }
                 if (state.loading && state.devices.isEmpty()) {
@@ -359,22 +452,37 @@ fun WaterScreen(
                 } else if (state.devices.isEmpty()) {
                     EmptyState(
                         Icons.Filled.WaterDrop,
-                        "暂无收藏设备",
-                        "先在慧生活798 App 里扫码绑定饮水机,再回本页添加",
+                        "暂无设备",
+                        "点右上角扫码图标,对着机身二维码扫一下即可添加",
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
                     // 长按卡片即可拖动排序;拖到屏幕底部的红色删除条上松手 = 移除该设备
-                    val lazyListState = rememberLazyListState()
+                    // 列表状态用上面提升出来的 deviceListState:扫码定位要跨这个分支滚动
+                    val lazyListState = deviceListState
                     // 震动走 View.performHapticFeedback:系统"触摸反馈"开关生效,也不需要 VIBRATE 权限
                     val haptic = LocalHapticFeedback.current
                     val reorderState = rememberReorderableLazyListState(lazyListState) { from, to ->
                         onReorder(from.index, to.index)
                     }
-                    LazyColumn(state = lazyListState, modifier = Modifier.fillMaxSize()) {
-                        itemsIndexed(state.devices, key = { _, d -> d.first }) { _, (did, name, running) ->
+                    // 悬浮底栏压在内容上:把底栏实高留出来,最后一张设备卡才不会被底栏盖住
+                    LazyColumn(
+                        state = lazyListState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(top = 4.dp, bottom = LocalBottomBarInset.current + 8.dp),
+                    ) {
+                        itemsIndexed(state.devices, key = { _, d -> d.first }) { index, (did, name, running) ->
                             ReorderableItem(reorderState, key = did) { isDragging ->
                                 val armed = draggingDid == did && overDelete
+                                // 没背景图时不再"一设备一浮卡":卡片首尾相连成一块面板,设备之间用分割线分
+                                // (与选课页的结果列表同一套);有背景图时保留浮卡 + 毛玻璃的观感
+                                val flatRow = !bgEnabled
+                                val rowShape = if (flatRow) RoundedCornerShape(
+                                    topStart = if (index == 0) 20.dp else 0.dp,
+                                    topEnd = if (index == 0) 20.dp else 0.dp,
+                                    bottomStart = if (index == state.devices.lastIndex) 20.dp else 0.dp,
+                                    bottomEnd = if (index == state.devices.lastIndex) 20.dp else 0.dp,
+                                ) else RoundedCornerShape(16.dp)
                                 // 松手那一刻指针停在删除条上才弹确认;拖动中途不动数据
                                 LaunchedEffect(isDragging) {
                                     if (isDragging) {
@@ -395,54 +503,92 @@ fun WaterScreen(
                                         .zIndex(if (isDragging) 1f else 0f)
                                         .graphicsLayer {
                                             if (isDragging) { scaleX = 1.03f; scaleY = 1.03f }
-                                        }
-                                        .longPressDraggableHandle(),
+                                        },
                                 ) {
                                     Card(
                                         Modifier
                                             .fillMaxWidth()
-                                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                                            .padding(
+                                                horizontal = 12.dp,
+                                                vertical = if (flatRow) 0.dp else 6.dp,
+                                            )
+                                            // 卡片衬底交给 glassSurface(它要画在 Card 自己的 surface 之下),
+                                            // 所以下面把 containerColor 设成透明
+                                            .glassSurface(
+                                                bgEnabled = bgEnabled,
+                                                backdrop = glassBackdrop,
+                                                shape = rowShape,
+                                                tintOverride = if (armed) MaterialTheme.colorScheme.errorContainer else null,
+                                            )
                                             .then(
                                                 // 0dp 宽的 border 不是"不画":Skia 把 strokeWidth=0 当 hairline,
-                                                // 常态会留一圈 1px 红框。不 armed 时干脆不挂描边
+                                                // 常态会留一圈 1px 红框。不 armed 时干脆不挂描边。
+                                                // 描边挂在衬底之后,否则会被半透明衬底盖掉一半
                                                 if (armed) Modifier.border(
                                                     BorderStroke(2.dp, deleteRed()),
-                                                    RoundedCornerShape(16.dp),
+                                                    rowShape,
+                                                ) else if (focusedDid == did) Modifier.border(
+                                                    // 扫码定位到的那台:一圈主色描边,列表再长也能一眼找到
+                                                    BorderStroke(2.dp, MaterialTheme.colorScheme.primary),
+                                                    rowShape,
                                                 ) else Modifier
                                             ),
-                                        shape = RoundedCornerShape(16.dp),
+                                        shape = rowShape,
                                         elevation = CardDefaults.cardElevation(
                                             defaultElevation = if (isDragging || armed) 8.dp else 0.dp,
                                         ),
-                                        colors = if (armed) CardDefaults.cardColors(
-                                            containerColor = MaterialTheme.colorScheme.errorContainer,
-                                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                                        ) else CardDefaults.cardColors(),
+                                        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
                                     ) {
                                         Row(
-                                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp),
+                                            // 左内边距让给手柄的 48dp 热区,右侧与原来的 16dp 一致
+                                            Modifier.fillMaxWidth()
+                                                .padding(start = 8.dp, top = 16.dp, end = 16.dp, bottom = 16.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
-                                            Icon(
-                                                Icons.Filled.DragHandle,
-                                                contentDescription = "长按拖动排序",
-                                                tint = MaterialTheme.colorScheme.outline,
-                                                modifier = Modifier.padding(end = 8.dp),
-                                            )
-                                            // 出水中让水滴呼吸:光靠 tint 变色在远处/强光下看不出来
-                                            DropIcon(running)
-                                            Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                                                Text(
-                                                    name.ifBlank { "饮水设备" },
-                                                    style = MaterialTheme.typography.bodyLarge,
-                                                    fontWeight = FontWeight.Medium,
-                                                )
-                                                Text(
-                                                    if (armed) "松手即从本应用移除" else "编号 $did",
-                                                    fontSize = 11.sp,
-                                                    color = if (armed) MaterialTheme.colorScheme.error
-                                                    else MaterialTheme.colorScheme.outline,
-                                                )
+                                            // 长按"非按钮区域"即可拖动:热区包住手柄、名称与编号,
+                                            // 「出水」按钮是它的兄弟节点,所以在按钮上长按不会起拖拽
+                                            Row(
+                                                Modifier
+                                                    .weight(1f)
+                                                    .longPressDraggableHandle(),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                // 手柄保留成视觉提示;它本身不再是唯一热区
+                                                Box(
+                                                    Modifier.size(48.dp),
+                                                    contentAlignment = Alignment.Center,
+                                                ) {
+                                                    Icon(
+                                                        Icons.Filled.DragHandle,
+                                                        contentDescription = "长按拖动排序",
+                                                        tint = MaterialTheme.colorScheme.outline,
+                                                    )
+                                                }
+                                                // 出水中让水滴呼吸:光靠 tint 变色在远处/强光下看不出来
+                                                DropIcon(running)
+                                                Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                                                    Text(
+                                                        name.ifBlank { "饮水设备" },
+                                                        style = MaterialTheme.typography.bodyLarge,
+                                                        fontWeight = FontWeight.Medium,
+                                                        // Card 的 containerColor 改成透明后 contentColor 不再兜底,显式给色
+                                                        color = if (armed) MaterialTheme.colorScheme.onErrorContainer
+                                                        else MaterialTheme.colorScheme.onSurface,
+                                                    )
+                                                    Text(
+                                                        when {
+                                                            armed -> "松手即从本应用移除"
+                                                            focusedDid == did -> "已定位 · 编号 $did"
+                                                            else -> "编号 $did"
+                                                        },
+                                                        fontSize = 11.sp,
+                                                        color = when {
+                                                            armed -> MaterialTheme.colorScheme.error
+                                                            focusedDid == did -> MaterialTheme.colorScheme.primary
+                                                            else -> MaterialTheme.colorScheme.outline
+                                                        },
+                                                    )
+                                                }
                                             }
                                             // 实体胶囊按钮 + 微弱投影:浅色模式下 tonal 底几乎看不出来,
                                             // 而这是本页唯一高频动作
@@ -484,6 +630,10 @@ fun WaterScreen(
                                     }
                                 }
                             }
+                            // 设备之间的分割线:与标题下、选课结果卡里同色且同长(见 HeaderDivider)。
+                            // 放在 ReorderableItem 之外,拖动某张卡时它不会跟着动
+                            // 这里在 ReorderableItem 之外,拿不到它内部的 flatRow,直接用函数参数判断
+                            if (!bgEnabled && index != state.devices.lastIndex) HeaderDivider()
                         }
                         item { Spacer(Modifier.height(24.dp)) }
                     }
@@ -560,15 +710,19 @@ fun WaterScreen(
 
             if (showAddDialog) {
                 AddDeviceDialog(
-                    initialDid = scanResult,
+                    initialDid = addDid,
                     onScan = {
                         // 关闭对话框 → 进扫码页;扫完 LaunchedEffect 会再次弹窗回填
                         showAddDialog = false
                         onScan()
                     },
-                    onDismiss = { showAddDialog = false },
+                    onDismiss = {
+                        showAddDialog = false
+                        addDid = null
+                    },
                     onConfirm = { did, name ->
                         showAddDialog = false
+                        addDid = null
                         onAddDevice(did.trim(), name.trim())
                     },
                 )
@@ -612,8 +766,8 @@ private fun AddDeviceDialog(
     onDismiss: () -> Unit,
     onConfirm: (String, String) -> Unit,
 ) {
-    // keyed by initialDid:扫码回填时重新初始化
-    var did by remember(initialDid) { mutableStateOf(initialDid ?: "") }
+    // 编号只来自扫码:直接取扫码结果,不再提供手动输入(避免绕过扫码添加)
+    val did = initialDid.orEmpty()
     var name by remember { mutableStateOf("") }
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
@@ -621,8 +775,9 @@ private fun AddDeviceDialog(
         text = {
             Column {
                 OutlinedTextField(
-                    value = did,
-                    onValueChange = { did = it },
+                    value = did.ifBlank { "(没读到编号)" },
+                    onValueChange = {},
+                    readOnly = true,
                     label = { Text("设备编号(did)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -640,7 +795,7 @@ private fun AddDeviceDialog(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "设备编号可在机身二维码中查看",
+                        "编号来自刚扫的机身码,换设备请重新扫码",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.weight(1f),

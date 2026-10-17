@@ -73,6 +73,7 @@ class SettingsStore(context: Context) {
         private const val KEY_SSO_ACCOUNT = "sso_account"
         private const val KEY_SSO_PASSWORD = "sso_password"
         const val KEY_CRED_TYPE = "credential_type" // jwxt=教务密码 / sso=统一身份认证密码
+        private const val KEY_NAV_DEFAULT_V2 = "nav_bar_default_v2" // 底栏默认值迁移标记
 
         /** 五大节默认起始时间(大节=两小节连上),依华电实际作息:
          *  1节08:00 / 3节10:00 / 5节14:30 / 7节16:30 / 9节19:30 */
@@ -122,6 +123,28 @@ class SettingsStore(context: Context) {
         get() = prefs.getString(KEY_SCHED_SOURCE, null) ?: "AUTO"
         set(v) = prefs.edit().putString(KEY_SCHED_SOURCE, v).apply()
 
+    init {
+        migrateNavBarDefaults()
+    }
+
+    /**
+     * 一次性迁移:旧默认是"标准 + 实色",新默认是"悬浮 + 液态玻璃"。
+     * 只在用户没动过这两项(仍是旧默认或从未写过)时改;自己选过别的组合就尊重原选择。
+     */
+    private fun migrateNavBarDefaults() {
+        if (prefs.getBoolean(KEY_NAV_DEFAULT_V2, false)) return
+        val shape = prefs.getString(KEY_NAV_SHAPE, null)
+        val material = prefs.getString(KEY_NAV_MATERIAL, null)
+        val untouched = (shape == null || shape == NavBarShape.STANDARD.name) &&
+            (material == null || material == NavMaterial.SOLID.name)
+        val editor = prefs.edit().putBoolean(KEY_NAV_DEFAULT_V2, true)
+        if (untouched) {
+            editor.putString(KEY_NAV_SHAPE, NavBarShape.FLOATING.name)
+                .putString(KEY_NAV_MATERIAL, NavMaterial.LIQUID.name)
+        }
+        editor.apply()
+    }
+
     /** 上次自动检查更新的时间(12 小时节流) */
     var lastUpdateCheck: Long
         get() = prefs.getLong(KEY_UPDATE_CHECK, 0L)
@@ -138,12 +161,12 @@ class SettingsStore(context: Context) {
 
     var navShape: NavBarShape
         get() = runCatching { NavBarShape.valueOf(prefs.getString(KEY_NAV_SHAPE, null) ?: "") }
-            .getOrDefault(NavBarShape.STANDARD)
+            .getOrDefault(NavBarShape.FLOATING)
         set(v) = prefs.edit().putString(KEY_NAV_SHAPE, v.name).apply()
 
     var navMaterial: NavMaterial
         get() = runCatching { NavMaterial.valueOf(prefs.getString(KEY_NAV_MATERIAL, null) ?: "") }
-            .getOrDefault(NavMaterial.SOLID)
+            .getOrDefault(NavMaterial.LIQUID)
         set(v) = prefs.edit().putString(KEY_NAV_MATERIAL, v.name).apply()
 
     var bgBlur: Float
