@@ -3,6 +3,11 @@ package com.ncepu.jw.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -191,7 +196,7 @@ fun SettingsScreen(
                     headlineContent = { Text("主题色彩") },
                     supportingContent = {
                         Row(
-                            Modifier.fillMaxWidth().padding(top = 10.dp),
+                            Modifier.fillMaxWidth().padding(top = 10.dp).selectableGroup(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             ThemePresets.ALL.forEach { p ->
@@ -208,7 +213,13 @@ fun SettingsScreen(
                                             else MaterialTheme.colorScheme.outlineVariant,
                                             CircleShape,
                                         )
-                                        .clickable { onPresetChange(p.key) },
+                                        .selectable(
+                                            selected = presetKey == p.key,
+                                            role = Role.RadioButton,
+                                            onClick = { onPresetChange(p.key) },
+                                        )
+                                        // 色块本身没有文字:读屏只能念出「华电蓝」这类名字
+                                        .semantics { contentDescription = p.label },
                                     contentAlignment = Alignment.Center,
                                 ) {}
                             }

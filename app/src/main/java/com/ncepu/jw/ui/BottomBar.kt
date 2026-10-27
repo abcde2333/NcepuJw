@@ -10,6 +10,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -168,18 +170,26 @@ fun AppBottomBar(
     }
 }
 
+/**
+ * 浅色玻璃底板的不透明度。这是「透」与「读得清」之间唯一的旋钮:
+ * 调低→壁纸透出来更多;调高→压住花壁纸、文字更稳。
+ * 上一版为了对比度把液态玻璃提到 0.56,结果胶囊糊成一块不透明的奶白,所以拉回通透档,
+ * 改由 1dp 描边 + 细高光交代边界(见 LiquidTabs 的可见胶囊)。
+ */
+private const val GLASS_DARK_ALPHA_LIQUID = 0.50f
+private const val GLASS_LIGHT_ALPHA_LIQUID = 0.34f
+private const val GLASS_LIGHT_ALPHA_BLUR = 0.28f
+
 @Composable
 private fun barColor(material: NavMaterial, isDark: Boolean): Color {
     val base = MaterialTheme.colorScheme.surfaceContainer
     return when (material) {
         NavMaterial.SOLID -> base
-        // 深色:近黑 + 高不透明度,做成"烟熏黑玻璃"(壁纸只透出模糊暗影)。
-        // 浅色:玻璃底板太透时,底栏文字/图标压在花壁纸或浅色照片上会糊,
-        // 提到 0.56/0.44(和内容卡片的 0.52 同一档),再配 1dp 描边 + 顶部高光保住对比
+        // 深色:近黑 + 高不透明度,做成"烟熏黑玻璃"(壁纸只透出模糊暗影)
         NavMaterial.LIQUID -> glassBase(base, isDark)
-            .copy(alpha = if (isDark) 0.62f else 0.56f)
+            .copy(alpha = if (isDark) GLASS_DARK_ALPHA_LIQUID else GLASS_LIGHT_ALPHA_LIQUID)
         NavMaterial.BLUR -> glassBase(base, isDark)
-            .copy(alpha = if (isDark) 0.52f else 0.44f)
+            .copy(alpha = if (isDark) 0.52f else GLASS_LIGHT_ALPHA_BLUR)
     }
 }
 
@@ -301,7 +311,7 @@ private fun LiquidTabs(
                     effects = {
                         vibrancy()
                         // 深色下壁纸要糊成一团暗影(参考图效果),浅色保持原来的清透度
-                        blur(if (isDark) 14f.dp.toPx() else 8f.dp.toPx())
+                        blur(if (isDark) 10f.dp.toPx() else 8f.dp.toPx())
                         lens(24f.dp.toPx(), 24f.dp.toPx())
                     },
                     layerBlock = {
@@ -312,13 +322,15 @@ private fun LiquidTabs(
                     },
                     onDrawSurface = { drawRect(containerColor) }
                 )
-                // 浅色对比保护:胶囊里叠一层顶部高光(玻璃厚度感),形状裁剪保证不出边
+                // 浅色:只在上沿留一线高光交代玻璃厚度。原来铺到 55% 高度、峰值 0.26,
+                // 等于又糊了一层白膜,跟「透明」互相抵消
                 .then(
                     if (isDark) Modifier
                     else Modifier.background(
                         Brush.verticalGradient(
-                            0f to Color.White.copy(alpha = 0.26f),
-                            0.55f to Color.White.copy(alpha = 0.08f),
+                            0f to Color.White.copy(alpha = 0.16f),
+                            0.22f to Color.White.copy(alpha = 0.04f),
+                            0.42f to Color.White.copy(alpha = 0f),
                             1f to Color.White.copy(alpha = 0f),
                         ),
                         Capsule(),
@@ -327,13 +339,14 @@ private fun LiquidTabs(
                 .border(
                     1.dp,
                     if (isDark) Color.White.copy(alpha = 0.10f)
-                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.20f),
+                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.24f),
                     Capsule(),
                 )
                 .then(interactiveHighlight.modifier)
                 .height(64f.dp)
                 .fillMaxWidth()
-                .padding(4f.dp),
+                .padding(4f.dp)
+                .selectableGroup(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TABS.forEachIndexed { i, spec ->
@@ -378,7 +391,7 @@ private fun LiquidTabs(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TABS.forEachIndexed { i, spec ->
-                    LiquidTab(i, spec, i == selectedTabIndex(), onTabSelected, forcedColor = accentColor)
+                    LiquidTab(i, spec, i == selectedTabIndex(), onTabSelected, forcedColor = accentColor, interactive = false)
                 }
             }
         }
@@ -442,7 +455,10 @@ private fun LiquidTabs(
     }
 }
 
-/** 单个液态玻璃 tab(图标+文字,按住随气泡微放大) */
+/**
+ * 单个液态玻璃 tab(图标+文字,按住随气泡微放大)。
+ * 选中态走 selectable(role = Tab),读屏会念「已选中」;父 Row 用 selectableGroup 归纳成一组。
+ */
 @Composable
 private fun RowScope.LiquidTab(
     index: Int,
@@ -450,16 +466,26 @@ private fun RowScope.LiquidTab(
     selected: Boolean,
     onTabSelected: (Int) -> Unit,
     forcedColor: Color? = null,
+    /** 折射用的隐形副本:不接点击、不进无障碍树(否则四个 tab 会被念两遍) */
+    interactive: Boolean = true,
 ) {
     val scale = LocalLiquidTabScale.current
     Column(
         Modifier
             .clip(Capsule())
-            .clickable(
-                interactionSource = null,
-                indication = null,
-                role = Role.Tab,
-            ) { onTabSelected(index) }
+            .then(
+                if (interactive) {
+                    Modifier.selectable(
+                        selected = selected,
+                        interactionSource = null,
+                        indication = null,
+                        role = Role.Tab,
+                        onClick = { onTabSelected(index) },
+                    )
+                } else {
+                    Modifier.clearAndSetSemantics { }
+                }
+            )
             .fillMaxHeight()
             .weight(1f)
             .graphicsLayer {
@@ -474,7 +500,8 @@ private fun RowScope.LiquidTab(
         else MaterialTheme.colorScheme.onSurfaceVariant
         val textColor = forcedColor ?: if (selected) MaterialTheme.colorScheme.primary
         else MaterialTheme.colorScheme.onSurfaceVariant
-        Icon(spec.icon, contentDescription = spec.label, tint = iconColor)
+        // 标签由下方 Text 提供,图标带 contentDescription 会让读屏念两遍
+        Icon(spec.icon, contentDescription = null, tint = iconColor)
         Text(spec.label, fontSize = 10.sp, color = textColor)
     }
 }
@@ -482,7 +509,7 @@ private fun RowScope.LiquidTab(
 @Composable
 private fun NavRow(tab: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
     Row(
-        modifier.fillMaxWidth().height(60.dp),
+        modifier.fillMaxWidth().height(60.dp).selectableGroup(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TABS.forEachIndexed { i, spec ->
@@ -501,13 +528,14 @@ private fun NavItem(
     Column(
         modifier
             .fillMaxSize()
-            .clickable { onClick() },
+            .selectable(selected = selected, role = Role.Tab, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         Icon(
             spec.icon,
-            contentDescription = spec.label,
+            // 标签由下方 Text 提供,避免读屏念两遍
+            contentDescription = null,
             tint = if (selected) MaterialTheme.colorScheme.primary
             else MaterialTheme.colorScheme.onSurfaceVariant,
         )

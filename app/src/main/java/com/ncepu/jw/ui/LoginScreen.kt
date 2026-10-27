@@ -2,7 +2,6 @@ package com.ncepu.jw.ui
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.expandVertically
@@ -18,6 +17,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
@@ -140,15 +140,19 @@ fun LoginScreen(
         Column(
             // imePadding:键盘弹出时把可用高度让出来,底部按钮/错误提示不再被压扁;
             // verticalScroll:让出后若还装不下(小屏 + 三种登录方式)也能滚到提交按钮。
-            // 宽高都还是 fillMaxSize,内容比视口短时 Arrangement.Center 照旧居中。
+            // 排版一律顶部对齐:一旦用 Arrangement.Center,键盘高度变化(学号数字键盘 / 密码
+            // 全键盘高度不同)会每帧重新居中,和输入框获焦时的自动滚动互相拉扯,切换焦点时
+            // 页面就会抽动甚至闪烁。顶部对齐没有这个二义性,代价是大屏上内容偏上。
             modifier = Modifier
                 .fillMaxSize()
+                .statusBarsPadding()
                 .imePadding()
                 .padding(horizontal = 32.dp)
                 .verticalScroll(rememberScrollState())
-                .animateContentSize(spring(dampingRatio = 0.9f, stiffness = 380f)),
+                // 顶部留白放在 scroll 之后:只推内容向下,不参与可用高度计算
+                .padding(top = 44.dp, bottom = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
+            verticalArrangement = Arrangement.Top,
         ) {
             Image(
                 painter = painterResource(R.drawable.ncepu_logo),
