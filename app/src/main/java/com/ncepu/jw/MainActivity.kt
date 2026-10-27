@@ -185,6 +185,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var schedSem by mutableStateOf(Semester.current())
     var schedLoading by mutableStateOf(false)
     var schedError by mutableStateOf<String?>(null)
+    /** 课表最近一次成功拉取时间(刷新失败时提示用;0=未知) */
+    var schedUpdatedAt by mutableStateOf(0L)
     var allCourses by mutableStateOf<List<Course>>(emptyList())  // 学期全量(xskb_list.do)
     var courses by mutableStateOf<List<Course>>(emptyList())     // 当前显示(周视图=本地过滤)
     var officialWeek by mutableStateOf(0)        // 官方当前周(教务系统计算,加载时取一次)
@@ -204,6 +206,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var gradeSem by mutableStateOf(Semester.current())
     var gradeLoading by mutableStateOf(false)
     var gradeError by mutableStateOf<String?>(null)
+    /** 成绩请求序号:切学期时旧响应作废(见 loadGrades) */
+    private var gradeReqId = 0
     var grades by mutableStateOf<List<Grade>>(emptyList())
 
     var selLoading by mutableStateOf(false)
@@ -212,6 +216,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var selectedCourses by mutableStateOf<List<com.ncepu.jw.data.SelectedCourse>>(emptyList())
     var selectionLoaded by mutableStateOf(false)
     private var selCacheTime by mutableStateOf(0L)
+    /** 缓存里选课结果所属学期:换了学期才允许用空结果覆盖旧列表 */
+    private var selCacheSem by mutableStateOf("")
 
     companion object {
         /** 选课缓存视为过期的时间(超时后进入选课页才再次请求) */
@@ -267,6 +273,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     selectedCourses = sel.selected
                     selectionLoaded = true
                     selCacheTime = sel.time
+                    selCacheSem = sel.sem
                 }
             }
         }
@@ -1190,6 +1197,25 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
      * XLS / HTML / 官方周次三个请求并发;silent=true 用于缓存已上屏后的后台刷新
      * (不显示 loading,失败不打扰,完成后保留用户当前所在周)。
      */
+    /** 课表失败横幅的「发生序号」:每设一次错误就 +1,跨页面存活 */
+    var schedBannerSeq by mutableStateOf(0)
+        private set
+
+    /** 已经展示过的序号:同一轮失败从别的页面回到课表不再重弹 */
+    var schedBannerAck by mutableStateOf(0)
+        private set
+
+    /** 统一出口:设错误的同时推进序号(失败横幅据此决定弹不弹;null 不推进) */
+    private fun flagSchedError(msg: String?) {
+        schedError = msg
+        if (msg != null) schedBannerSeq++
+    }
+
+    /** 课表页把当前横幅标记为已读 */
+    fun ackSchedBanner() {
+        schedBannerAck = schedBannerSeq
+    }
+
     fun loadSchedule(force: Boolean = false, silent: Boolean = false) {
         if (schedLoaded && !force) {
             courses = allCourses
@@ -1202,9 +1228,11 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
         // 未登录:请求必然失败(无会话,302),不浪费请求也不触发风控,直接回退缓存
         if (!loggedIn) {
-            if (!fallBackToCache() && !silent) {
-                schedError = "请先在「我的」登录教务系统后加载课表"
-            }
+            // 先回退缓存(有缓存就继续显示课表),再给原因。
+            // 原来写成 `if (!fallBackToCache() && !silent)`:有缓存时 fallBackToCache() 返回 true,
+            // 错误被整句吞掉 —— 未登录点刷新什么都不会发生。
+            fallBackToCache()
+            if (!silent) flagSchedError("请先在「我的」登录教务系统后加载课表")
             return
         }
         // 校外模式且隧道会话未就绪:仅"确实要联网"时才登录。
@@ -1247,6 +1275,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 schedLoaded = true
                 name = client.studentName ?: name
                 settings.cacheCourses(full)
+                settings.scheduleUpdatedAtMillis = System.currentTimeMillis()
+                schedUpdatedAt = settings.scheduleUpdatedAtMillis
                 com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(getApplication())
                 refreshHolidays()
                 // 手动刷新/切学期重新联网后,恢复自动数据源(覆盖手动导入的固定数据)
@@ -1258,7 +1288,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     ReminderScheduler.reschedule(getApplication())
                 }
                 if (!silent || full.isEmpty()) {
-                    schedError = if (full.isEmpty()) "本学期暂无课表(接口返回为空)" else null
+                    flagSchedError(if (full.isEmpty()) "本学期暂无课表(接口返回为空)" else null)
                 }
             } catch (e: Exception) {
                 // 校外模式:若因会话过期/代理回登录页导致失败,清就绪标记,下次进页自动重连(按需弹码)
@@ -1269,9 +1299,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 }
                 // 界面上还没有数据时优先回退本地缓存;失败且无缓存才显示错误
                 if (allCourses.isEmpty()) {
-                    if (!fallBackToCache()) schedError = e.message ?: "加载失败"
+                    if (!fallBackToCache()) flagSchedError(e.message ?: "加载失败")
                 } else if (!silent) {
-                    schedError = e.message ?: "加载失败"
+                    flagSchedError(e.message ?: "加载失败")
                 }
             } finally {
                 schedLoading = false
@@ -1379,6 +1409,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     /** 未登录/加载失败时回退本地缓存课表;返回是否已有可显示的课表 */
     private fun fallBackToCache(): Boolean {
+        if (schedUpdatedAt <= 0L) schedUpdatedAt = settings.scheduleUpdatedAtMillis
         if (allCourses.isNotEmpty()) { schedDiag = ""; return true }
         val cached = settings.loadCachedCourses()
         if (cached.isEmpty()) { schedDiag = schedDiagText() + ", cacheFile=空"; return false }
@@ -1422,6 +1453,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 if (officialWeek <= 0) officialWeek = localCurrentWeek()
                 settings.scheduleSource = "MANUAL"
                 settings.cacheCourses(parsed)
+                settings.scheduleUpdatedAtMillis = System.currentTimeMillis()
+                schedUpdatedAt = settings.scheduleUpdatedAtMillis
                 com.ncepu.jw.widget.ScheduleWidgetProvider.updateAll(getApplication())
                 if (settings.reminderEnabled) {
                     ReminderScheduler.reschedule(getApplication())
@@ -1430,7 +1463,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                     getApplication(), "已导入 ${parsed.size} 条课程记录", android.widget.Toast.LENGTH_SHORT
                 ).show()
             } catch (e: Exception) {
-                schedError = e.message ?: "导入失败"
+                flagSchedError(e.message ?: "导入失败")
                 android.widget.Toast.makeText(
                     getApplication(), "导入失败:${e.message}", android.widget.Toast.LENGTH_LONG
                 ).show()
@@ -1440,19 +1473,24 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     fun loadGrades() {
         if (webvpnNeedsRelogin()) return   // 校外隧道未就绪:先惰性登录,登录后会自动重来
+        // 请求学期快照 + 请求序号:快速切学期时,旧响应不能拿新学期的 key 去过滤,更不能覆盖当前结果
+        val sem = gradeSem
+        val reqId = ++gradeReqId
         gradeLoading = true
         gradeError = null
         viewModelScope.launch {
             try {
-                val page = client.fetchGrades(gradeSem)
-                grades = page.items.filter { it.term == gradeSem.key }
+                val page = client.fetchGrades(sem)
+                if (reqId != gradeReqId) return@launch   // 过期响应:丢弃
+                grades = page.items.filter { it.term == sem.key }
                 name = client.studentName ?: name
                 gradeError = null
             } catch (e: Exception) {
+                if (reqId != gradeReqId) return@launch
                 grades = emptyList()
                 gradeError = e.message ?: "加载失败"
             } finally {
-                gradeLoading = false
+                if (reqId == gradeReqId) gradeLoading = false
             }
         }
     }
@@ -1479,11 +1517,16 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 // 选课结果针对当前学期,用课表学期 schedSem(默认 Semester.current()),不受成绩页切学期影响
                 val selected = client.fetchSelectedCourses(schedSem)
                 xkRounds = rounds
-                selectedCourses = selected
+                // 没有轮次时教务的「已选课程」查询返回空表,和「真的退光了」分不出来。
+                // 这时保留已有结果,否则缓存被冲成空,下次启动连旧结果都读不出来。
+                val sameSem = selCacheSem.isEmpty() || selCacheSem == schedSem.key
+                val keepOld = selected.isEmpty() && selectedCourses.isNotEmpty() && rounds.isEmpty() && sameSem
+                if (!keepOld) selectedCourses = selected
                 selectionLoaded = true
                 selCacheTime = System.currentTimeMillis()
+                selCacheSem = schedSem.key
                 selError = null
-                withContext(Dispatchers.IO) { settings.cacheSelection(rounds, selected) }
+                withContext(Dispatchers.IO) { settings.cacheSelection(rounds, selectedCourses, schedSem.key) }
             } catch (e: Exception) {
                 if (!silent || xkRounds.isEmpty()) selError = e.message ?: "加载失败"
             } finally {
@@ -1529,7 +1572,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         account = ""; password = ""
         name = null   // 否则退登后头部仍显示旧姓名,与"未登录"矛盾
         courses = emptyList(); grades = emptyList()
-        xkRounds = emptyList(); selectedCourses = emptyList(); selectionLoaded = false; selCacheTime = 0
+        xkRounds = emptyList(); selectedCourses = emptyList(); selectionLoaded = false; selCacheTime = 0; selCacheSem = ""
         allCourses = emptyList(); schedLoaded = false
         pyfa = null; pyfaError = null
         exams = emptyList(); examError = null
@@ -2487,6 +2530,7 @@ class MainActivity : ComponentActivity() {
                             0 -> ScheduleScreen(
                                 loading = vm.schedLoading,
                                 error = vm.schedError,
+                                updatedAtMillis = vm.schedUpdatedAt,
                                 allCourses = vm.allCourses,
                                 diag = vm.schedDiag,
                                 weekStartMillis = appearance.weekStartMillis,
@@ -2496,7 +2540,13 @@ class MainActivity : ComponentActivity() {
                                 glassBackdrop = glassBackdrop,
                                 onRetry = { vm.loadSchedule(force = true) },
                                 onScan = onOpenScan,
-                                onRefresh = { vm.loadSchedule(force = true) },
+                                // 导入课表(MANUAL)不做联网刷新:刷新按钮干脆不出现,
+                                // 扫码于是落到最右;要重新导入去「我的 → 课表」重新选文件
+                                onRefresh = if (vm.scheduleSource == "MANUAL") null
+                                else ({ vm.loadSchedule(force = true) }),
+                                bannerSeq = vm.schedBannerSeq,
+                                bannerAck = vm.schedBannerAck,
+                                onBannerAck = { vm.ackSchedBanner() },
                                 onOpenExams = onOpenExams,
                             )
                             1 -> WaterScreen(

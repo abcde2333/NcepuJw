@@ -67,6 +67,7 @@ class SettingsStore(context: Context) {
         const val KEY_UPDATE_SNOOZE = "update_snooze_code" // 已"以后再说"的版本
         const val KEY_HOLIDAY_DATES = "holiday_dates"      // 法定假日 ISO 日期串 JSON 数组
         const val KEY_HOLIDAY_SYNC_AT = "holiday_sync_at"  // 上次成功同步时间戳
+        const val KEY_SCHED_UPDATED_AT = "sched_updated_at" // 课表最近一次成功拉取
         const val KEY_HOLIDAY_YEAR = "holiday_year"        // 缓存所属年份
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
@@ -214,6 +215,11 @@ class SettingsStore(context: Context) {
     var holidaySyncAtMillis: Long
         get() = prefs.getLong(KEY_HOLIDAY_SYNC_AT, 0L)
         set(v) = prefs.edit().putLong(KEY_HOLIDAY_SYNC_AT, v).apply()
+
+    /** 课表最近一次成功拉取的时间戳(刷新失败时提示「更新于 …」;0=未知) */
+    var scheduleUpdatedAtMillis: Long
+        get() = prefs.getLong(KEY_SCHED_UPDATED_AT, 0L)
+        set(v) = prefs.edit().putLong(KEY_SCHED_UPDATED_AT, v).apply()
 
     /** 节假日缓存所属年份(跨年自动失效重拉) */
     var holidayYear: Int
@@ -564,11 +570,17 @@ class SettingsStore(context: Context) {
     }
 
     /** 选课缓存:轮次 + 已选课程 + 抓取时间(选课接口有风控,频控在调用方做) */
-    data class SelCache(val time: Long, val rounds: List<XkRound>, val selected: List<SelectedCourse>)
+    data class SelCache(
+        val time: Long,
+        val sem: String,
+        val rounds: List<XkRound>,
+        val selected: List<SelectedCourse>,
+    )
 
-    fun cacheSelection(rounds: List<XkRound>, selected: List<SelectedCourse>) {
+    fun cacheSelection(rounds: List<XkRound>, selected: List<SelectedCourse>, sem: String = "") {
         val root = JSONObject()
             .put("time", System.currentTimeMillis())
+            .put("sem", sem)
             .put("rounds", JSONArray().apply {
                 for (r in rounds) put(JSONObject().apply {
                     put("term", r.term); put("name", r.name)
@@ -612,7 +624,9 @@ class SettingsStore(context: Context) {
                     attr = o.optString("attr"), nature = o.optString("nature"),
                 )
             }
-            SelCache(root.optLong("time"), rounds, selected)
-        }.getOrNull()?.takeIf { it.rounds.isNotEmpty() }
+            SelCache(root.optLong("time"), root.optString("sem"), rounds, selected)
+        }.getOrNull()?.takeIf { it.rounds.isNotEmpty() || it.selected.isNotEmpty() }
+        // 选课轮次是季节性才有的,学期中/假期里它必然是空;
+        // 之前这里要求轮次非空,等于把已缓存的选课结果一起判死(重启后凭空消失)
     }
 }

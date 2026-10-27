@@ -1,5 +1,10 @@
 package com.ncepu.jw.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -28,6 +33,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.LocalContentColor
@@ -176,6 +182,67 @@ private fun placeCourses(courses: List<Course>): List<PlacedCourse> {
     return out
 }
 
+/** 失败横幅停留时长:够读一眼,又不长期占位(课表本身是完整的) */
+private const val BANNER_VISIBLE_MS = 5_000L
+
+/** 刷新失败但已有旧数据时的非阻断提示条(首屏失败仍走中央错误块) */
+@Composable
+private fun StaleScheduleBanner(
+    reason: String,
+    updatedAtMillis: Long,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val fg = MaterialTheme.colorScheme.onErrorContainer
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f))
+            .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.CloudOff,
+            contentDescription = null,
+            tint = fg.copy(alpha = 0.9f),
+            modifier = Modifier.size(14.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "刷新失败,显示的是上次缓存的课表",
+                style = MaterialTheme.typography.labelSmall,
+                color = fg,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (updatedAtMillis > 0L) {
+                Text(
+                    "更新于 ${formatUpdatedAtMillis(updatedAtMillis)} · $reason",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = fg.copy(alpha = 0.75f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Text(
+            "重试",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .clickable(onClick = onRetry)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+        )
+    }
+}
+
+/** 时间戳 → 「MM-dd HH:mm」 */
+private fun formatUpdatedAtMillis(ms: Long): String =
+    java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA).format(java.util.Date(ms))
+
 /**
  * 课表页:周视图(数据来自 xskb_list.do 全量解析,本地按周过滤),HorizontalPager 无缝左右滑。
  * 只保留周视图 —— 「查看全部课表(学期全量)」已移除;表头/时间轴字号统一走 AppTypography。
@@ -185,6 +252,8 @@ private fun placeCourses(courses: List<Course>): List<PlacedCourse> {
 fun ScheduleScreen(
     loading: Boolean,
     error: String?,
+    /** 最近一次成功拉取时间(毫秒);刷新失败提示条用它显示「更新于 …」 */
+    updatedAtMillis: Long = 0L,
     allCourses: List<Course>,
     officialWeek: Int,
     weekStartMillis: Long = 0L,
@@ -198,6 +267,10 @@ fun ScheduleScreen(
     onRefresh: (() -> Unit)? = null,
     diag: String = "",
     onOpenExams: (() -> Unit)? = null,
+    /** 失败横幅的发生/已读序号:由 VM 持有,跨页面存活,免得每回一次课表就重弹 */
+    bannerSeq: Int = 0,
+    bannerAck: Int = 0,
+    onBannerAck: () -> Unit = {},
 ) {
     var selectedCourse by remember { mutableStateOf<Course?>(null) }
     val todayText = remember { HEADER_DATE_FMT.format(Calendar.getInstance().time) }
@@ -350,6 +423,38 @@ fun ScheduleScreen(
             }
 
             // ---- 内容区 ----
+            Column(Modifier.weight(1f).fillMaxWidth()) {
+            // 已有旧数据时刷新失败:课表照常显示,顶部短暂给一条非阻断提示(5s 后自行收起)
+            val staleError = if (error != null && allCourses.isNotEmpty()) error else null
+            var bannerShown by remember { mutableStateOf(false) }
+            // 注意 key 里不含 bannerAck:标记已读不该打断 5 秒计时
+            LaunchedEffect(staleError, loading, bannerSeq) {
+                when {
+                    // 刷新中先收起,出结果再定
+                    loading -> bannerShown = false
+                    // 只在这一轮错误还没展示过时弹:composable 重建(切页回来)不会重弹
+                    staleError != null && bannerSeq > bannerAck -> {
+                        bannerShown = true
+                        // 一冒头就记账,5 秒内切走再回来也不会重弹
+                        onBannerAck()
+                        delay(BANNER_VISIBLE_MS)
+                        bannerShown = false
+                    }
+                    else -> bannerShown = false
+                }
+            }
+            AnimatedVisibility(
+                visible = bannerShown && staleError != null,
+                enter = fadeIn(tween(180)) + expandVertically(tween(220), expandFrom = Alignment.Top),
+                exit = fadeOut(tween(180)) + shrinkVertically(tween(220), shrinkTowards = Alignment.Top),
+            ) {
+                StaleScheduleBanner(
+                    reason = staleError.orEmpty(),
+                    updatedAtMillis = updatedAtMillis,
+                    onRetry = onRetry,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
             if (loading && allCourses.isEmpty()) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -404,6 +509,7 @@ fun ScheduleScreen(
                     }
                 }
                 }
+            }
             }
         }
 
