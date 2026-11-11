@@ -61,6 +61,7 @@ class SettingsStore(context: Context) {
         const val KEY_WASHER_TOKEN = "washer_token"
         const val KEY_WASHER_DEVICES = "washer_devices"
         const val KEY_EXAM_CACHE = "exam_cache"
+        const val KEY_EXAM_CACHE_AT = "exam_cache_at" // 缓存写入时间,考试页显示"更新于"
         const val KEY_SEL_CACHE = "selection_cache"
         const val KEY_SCHED_SOURCE = "schedule_source" // AUTO=联网 / MANUAL=手动导入
         const val KEY_UPDATE_CHECK = "update_last_check"
@@ -433,6 +434,13 @@ class SettingsStore(context: Context) {
         waterDevices = list
     }
 
+    /** 只改显示名,不动编号与顺序(点名字改备注用) */
+    fun renameWaterDevice(did: String, name: String) {
+        val clean = name.trim().ifBlank { "饮水设备" }
+        if (waterDevices.none { it.first == did }) return
+        waterDevices = waterDevices.map { if (it.first == did) it.first to clean else it }
+    }
+
     fun removeWaterDevice(did: String) {
         waterDevices = waterDevices.filter { it.first != did }
     }
@@ -544,7 +552,10 @@ class SettingsStore(context: Context) {
                 put("seat", e.seat)
             })
         }
-        prefs.edit().putString(KEY_EXAM_CACHE, arr.toString()).apply()
+        prefs.edit()
+            .putString(KEY_EXAM_CACHE, arr.toString())
+            .putLong(KEY_EXAM_CACHE_AT, System.currentTimeMillis())
+            .apply()
     }
 
     fun loadCachedExams(): List<Exam> {
@@ -568,6 +579,9 @@ class SettingsStore(context: Context) {
             }
         }.getOrDefault(emptyList())
     }
+
+    /** 考试缓存写入时间(0 = 从未缓存过) */
+    val examsCachedAtMillis: Long get() = prefs.getLong(KEY_EXAM_CACHE_AT, 0L)
 
     /** 选课缓存:轮次 + 已选课程 + 抓取时间(选课接口有风控,频控在调用方做) */
     data class SelCache(

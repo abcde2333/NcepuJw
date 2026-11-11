@@ -218,10 +218,14 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     private var selCacheTime by mutableStateOf(0L)
     /** 缓存里选课结果所属学期:换了学期才允许用空结果覆盖旧列表 */
     private var selCacheSem by mutableStateOf("")
+    /** 考试安排最近一次成功拉取时间:进页面自动刷新时用它节流(见 loadExams) */
+    private var examFetchedAt = 0L
 
     companion object {
         /** 选课缓存视为过期的时间(超时后进入选课页才再次请求) */
         private const val SEL_STALE_MS = 10 * 60_000L
+        /** 考试安排视为新鲜的时间:进页面自动刷新在此之内直接跳过 */
+        private const val EXAM_STALE_MS = 5 * 60_000L
     }
 
     var pyfaLoading by mutableStateOf(false)
@@ -232,6 +236,10 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var examLoading by mutableStateOf(false)
     var examError by mutableStateOf<String?>(null)
     var exams by mutableStateOf<List<com.ncepu.jw.data.Exam>>(emptyList())
+    /** 当前考试列表来自本地缓存:没连校园网/拉取失败时用缓存垫底,页面据此提示"离线缓存" */
+    var examFromCache by mutableStateOf(false)
+    /** 缓存写入时间(0 = 缓存里没有时间戳),给"更新于"用 */
+    var examsCachedAt by mutableStateOf(0L)
 
     // U净洗衣机
     val ujing = UjingClient()
@@ -277,6 +285,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 }
             }
         }
+        // 考试安排:同步预载缓存垫底(没连校园网时进考试页直接有内容),
+        // 进页面后仍会自动静默刷新一次,拿到新数据就覆盖
+        runCatching { primeExamsFromCache() }
         // 启动时自动检查更新(12 小时节流,镜像站加速)
         viewModelScope.launch(Dispatchers.IO) { checkForUpdate(force = false) }
         // 启动即同步节假日(内部按 7 天/换年节流):只靠"刷课表后同步"会让装完新版没刷课表的用户
@@ -320,6 +331,17 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
      */
     fun consumeWaterScan() {
         waterScanResult = null
+    }
+
+    /** 改饮水机备注:只动本地显示名(设备号是机身码,改不了),不动顺序与在途状态 */
+    fun renameWaterDevice(did: String, name: String) {
+        val clean = name.trim().ifBlank { "饮水设备" }
+        settings.renameWaterDevice(did, clean)
+        waterState = waterState.copy(
+            devices = waterState.devices.map {
+                if (it.first == did) Triple(it.first, clean, it.third) else it
+            },
+        )
     }
 
     fun removeWaterDevice(did: String) {
@@ -1408,6 +1430,20 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             "loggedIn=$loggedIn, credType=${settings.credentialType()}"
 
     /** 未登录/加载失败时回退本地缓存课表;返回是否已有可显示的课表 */
+    /**
+     * 把考试缓存灌进内存列表。有内容就返回 true(调用方据此决定要不要弹错误)。
+     * 内存里已有数据时直接返回 true——它比缓存更新。
+     */
+    private fun primeExamsFromCache(): Boolean {
+        if (exams.isNotEmpty()) return true
+        val cached = runCatching { settings.loadCachedExams() }.getOrDefault(emptyList())
+        if (cached.isEmpty()) return false
+        exams = cached
+        examsCachedAt = settings.examsCachedAtMillis
+        examFromCache = true
+        return true
+    }
+
     private fun fallBackToCache(): Boolean {
         if (schedUpdatedAt <= 0L) schedUpdatedAt = settings.scheduleUpdatedAtMillis
         if (allCourses.isNotEmpty()) { schedDiag = ""; return true }
@@ -1550,16 +1586,39 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         }
     }
 
-    fun loadExams() {
-        if (webvpnNeedsRelogin()) return   // 校外隧道未就绪:先惰性登录,登录后自动重来
-        examLoading = true
-        examError = null
+    /**
+     * 考试安排。进页面会自动调一次(silent),所以这里带一层节流:
+     * - 已有数据且 EXAM_STALE_MS 内拉过 → 直接返回,来回切页不重复打接口;
+     * - 已有数据时后台静默刷新:不翻全屏 loading,否则每次进页面都闪一下转圈、把列表变空;
+     * - force=true(点刷新 / 切学期 / 重试)绕过节流。
+     */
+    fun loadExams(silent: Boolean = false, force: Boolean = false) {
+        if (webvpnNeedsRelogin()) {        // 校外隧道未就绪:先惰性登录,登录后自动重来
+            primeExamsFromCache()          // 等待登录期间先看缓存,别留空白页
+            return
+        }
+        if (examLoading) return            // 请求在途:重入没有意义
+        val fresh = System.currentTimeMillis() - examFetchedAt < EXAM_STALE_MS
+        if (!force && exams.isNotEmpty() && fresh) return
+        val background = silent || exams.isNotEmpty()
+        if (!background) {
+            examLoading = true
+            examError = null
+        }
         viewModelScope.launch {
             try {
                 exams = client.fetchExams(examSem)
+                examFetchedAt = System.currentTimeMillis()
+                examsCachedAt = examFetchedAt
+                examFromCache = false
+                examError = null
                 settings.cacheExams(exams)
                 ReminderScheduler.reschedule(getApplication())
             } catch (e: Exception) {
+                // 拉不到:先拿缓存垫底(没连校园网/服务端抽风都是这条路),
+                // 再把原因交给页面——有数据时顶部挂非阻断横幅(与课表页同一套),
+                // 一点内容都没有才整屏报错。
+                primeExamsFromCache()
                 examError = e.message ?: "加载失败"
             } finally {
                 examLoading = false
@@ -1898,14 +1957,19 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     composable("exams") {
+                        // 每次进页面自动刷新一次:已有数据时静默(不闪转圈),5 分钟内不重复请求
+                        LaunchedEffect(Unit) { vm.loadExams(silent = true) }
                         ExamScreen(
                             semesters = vm.semesters,
                             selected = vm.examSem,
                             loading = vm.examLoading,
                             error = vm.examError,
                             exams = vm.exams,
-                            onSemesterChange = { vm.examSem = it; vm.loadExams() },
-                            onRetry = { vm.loadExams() },
+                            onSemesterChange = { vm.examSem = it; vm.loadExams(force = true) },
+                            onRetry = { vm.loadExams(force = true) },
+                            onRefresh = { vm.loadExams(force = true) },
+                            fromCache = vm.examFromCache,
+                            cachedAtMillis = vm.examsCachedAt,
                         )
                     }
                     composable("grades") {
@@ -2566,6 +2630,7 @@ class MainActivity : ComponentActivity() {
                                 onEndDevice = { vm.endWaterDevice(it) },
                                 onAddDevice = { did, name -> vm.addWaterDevice(did, name) },
                                 onRemoveDevice = { did -> vm.removeWaterDevice(did) },
+                                onRenameDevice = { did, name -> vm.renameWaterDevice(did, name) },
                                 onReorder = { from, to -> vm.moveWaterDevice(from, to) },
                                 onScan = onOpenWaterScan,
                                 scanResult = vm.waterScanResult,

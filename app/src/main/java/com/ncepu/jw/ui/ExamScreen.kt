@@ -9,15 +9,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,15 +44,70 @@ fun ExamScreen(
     exams: List<Exam>,
     onSemesterChange: (Semester) -> Unit,
     onRetry: () -> Unit,
+    onRefresh: () -> Unit = onRetry,
+    /** 列表来自本地缓存(没连校园网):在标题下说明数据来源,别让人误以为是最新的 */
+    fromCache: Boolean = false,
+    cachedAtMillis: Long = 0L,
 ) {
     Column(Modifier.fillMaxSize()) {
-        SemesterBar(semesters, selected, onSemesterChange, title = "考试安排")
+        SemesterBar(
+            semesters = semesters,
+            selected = selected,
+            onChange = onSemesterChange,
+            title = "考试安排",
+            // 与课表页右上角同一套 HeaderIconAction(阴影 + 判色),加载中置灰防连点
+            trailing = {
+                HeaderIconAction(
+                    label = "刷新",
+                    onClick = onRefresh,
+                    enabled = !loading,
+                    icon = { Icon(Icons.Filled.Refresh, "刷新考试安排", Modifier.size(22.dp)) },
+                )
+            },
+        )
+
+        // 刷新失败(还有旧数据):与课表页同一条非阻断提示,带原因和重试
+        if (error != null && exams.isNotEmpty()) {
+            StaleScheduleBanner(
+                reason = error,
+                updatedAtMillis = cachedAtMillis,
+                onRetry = onRetry,
+                message = "刷新失败,显示的是上次缓存的考试安排",
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            )
+        }
+
+        // 离线提示:只说明数据来源,不挡内容、不需要手动关(刷新成功后自动消失);
+        // 已经有失败横幅时不重复说一遍
+        if (fromCache && error == null && exams.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.CloudOff,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.size(6.dp))
+                Text(
+                    text = if (cachedAtMillis > 0L) {
+                        "离线缓存 · 更新于 ${formatCachedAt(cachedAtMillis)} · 点右上角刷新可重试"
+                    } else {
+                        "离线缓存 · 点右上角刷新可重试"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
 
         if (loading) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             return@Column
         }
-        if (error != null) {
+        if (error != null && exams.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(error, color = MaterialTheme.colorScheme.error,
@@ -131,3 +190,8 @@ fun ExamScreen(
         }
     }
 }
+
+/** 缓存时间:显示 月-日 时:分 */
+private fun formatCachedAt(ms: Long): String =
+    java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)
+        .format(java.util.Date(ms))

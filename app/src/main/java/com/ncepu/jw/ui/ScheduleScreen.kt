@@ -187,10 +187,15 @@ private const val BANNER_VISIBLE_MS = 5_000L
 
 /** 刷新失败但已有旧数据时的非阻断提示条(首屏失败仍走中央错误块) */
 @Composable
-private fun StaleScheduleBanner(
+/**
+ * 刷新失败但还有旧数据可看时的非阻断提示:原因 + 更新时间 + 重试。
+ * 课表页与本包内其它页面共用(考试页用 message 换称谓)。
+ */
+internal fun StaleScheduleBanner(
     reason: String,
     updatedAtMillis: Long,
     onRetry: () -> Unit,
+    message: String = "刷新失败,显示的是上次缓存的课表",
     modifier: Modifier = Modifier,
 ) {
     val fg = MaterialTheme.colorScheme.onErrorContainer
@@ -211,7 +216,7 @@ private fun StaleScheduleBanner(
         Spacer(Modifier.width(6.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                "刷新失败,显示的是上次缓存的课表",
+                message,
                 style = MaterialTheme.typography.labelSmall,
                 color = fg,
                 fontWeight = FontWeight.Medium,

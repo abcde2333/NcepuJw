@@ -141,6 +141,8 @@ fun WaterScreen(
     onEndDevice: (String) -> Unit,
     onAddDevice: (String, String) -> Unit,
     onRemoveDevice: (String) -> Unit,
+    /** 改备注:只是本地显示名,不影响慧生活798 里的收藏 */
+    onRenameDevice: (String, String) -> Unit = { _, _ -> },
     onReorder: (Int, Int) -> Unit = { _, _ -> },
     onScan: () -> Unit,
     scanResult: String? = null,
@@ -161,6 +163,8 @@ fun WaterScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     // 待添加的设备编号(扫码带过来的)。不放 VM:VM 里的扫码信号是一次性的,处理完就清
     var addDid by remember { mutableStateOf<String?>(null) }
+    // 正在改备注的设备编号(null = 对话框没开)
+    var renameTarget by remember { mutableStateOf<String?>(null) }
     // 设备列表的滚动状态提到这里:扫码命中已有设备时要滚到那一张(见下面的 focusedDid)
     val deviceListState = rememberLazyListState()
     // 扫码命中列表里已有的设备时高亮那一张,FOCUS_HIGHLIGHT_MS 后自动褪去
@@ -569,6 +573,11 @@ fun WaterScreen(
                                                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
                                                     Text(
                                                         name.ifBlank { "饮水设备" },
+                                                        // 点名字改备注:点击与长按拖拽不冲突;armed(拖到删除区)时让位给删除手势
+                                                        modifier = Modifier
+                                                            .clip(RoundedCornerShape(6.dp))
+                                                            .clickable(enabled = !armed) { renameTarget = did }
+                                                            .padding(horizontal = 2.dp, vertical = 1.dp),
                                                         style = MaterialTheme.typography.bodyLarge,
                                                         fontWeight = FontWeight.Medium,
                                                         // Card 的 containerColor 改成透明后 contentColor 不再兜底,显式给色
@@ -724,6 +733,37 @@ fun WaterScreen(
                         showAddDialog = false
                         addDid = null
                         onAddDevice(did.trim(), name.trim())
+                    },
+                )
+            }
+
+            renameTarget?.let { did ->
+                // key 用 did:换一台设备对话框里的旧输入不会串过去
+                var text by remember(did) {
+                    mutableStateOf(state.devices.firstOrNull { it.first == did }?.second.orEmpty())
+                }
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { renameTarget = null },
+                    title = { Text("设备备注") },
+                    text = {
+                        OutlinedTextField(
+                            value = text,
+                            onValueChange = { text = it },
+                            singleLine = true,
+                            label = { Text("名称") },
+                            placeholder = { Text("如:12舍 424") },
+                            supportingText = { Text("只改本应用的显示名,不影响慧生活798") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    },
+                    confirmButton = {
+                        Button(onClick = {
+                            onRenameDevice(did, text)
+                            renameTarget = null
+                        }) { Text("保存") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { renameTarget = null }) { Text("取消") }
                     },
                 )
             }
