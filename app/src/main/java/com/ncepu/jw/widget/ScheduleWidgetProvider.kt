@@ -20,7 +20,7 @@ import java.util.Calendar
 /**
  * 桌面小部件「今日课表」(静态 RemoteViews)。
  *
- * 头部:学期缩写 + 日期/周次/星期 + 饮水快捷按钮;主体:今天/明天两列固定行(最多 5 节)。
+ * 头部:学期缩写 + 日期/周次/星期;主体:今天/明天两列固定行(最多 5 节)。
  * 不使用 RemoteViewsService/ListView —— 数据由 Provider 一次性铺进布局,
  * 进程被 MIUI 冻结后仍可保留上次渲染,规避"载入窗口小部件时出现问题"。
  * 样式(深色/浅色/半透明)由 SettingsStore.widgetStyle 全局决定;法定节假日显示"放假无课"。
@@ -110,9 +110,9 @@ class ScheduleWidgetProvider : AppWidgetProvider() {
 
             applyStyle(views, store.widgetStyle)
 
-            // 整卡点击 → 打开 App(课表);饮水按钮 → 打开 App 并定位到饮水 tab(1)
+            // 整卡点击 → 打开 App(课表);饮水快捷按钮已移除(登录接口失效后没有可用入口)
             views.setOnClickPendingIntent(R.id.widget_root, tapIntent(context, 0))
-            views.setOnClickPendingIntent(R.id.btn_water, tapIntent(context, 1))
+            views.setViewVisibility(R.id.btn_water, android.view.View.GONE)
             return views
         }
 
@@ -214,7 +214,6 @@ class ScheduleWidgetProvider : AppWidgetProvider() {
             views.setInt(R.id.widget_root, "setBackgroundResource", bg)
             views.setTextColor(R.id.tv_semester, primary)
             views.setTextColor(R.id.tv_date, primary)
-            views.setTextColor(R.id.btn_water, primary)
         }
 
         private data class Colors(

@@ -324,11 +324,14 @@ fun WaterScreen(
                         )
                         .padding(16.dp),
                 ) {
+                    OfficialLoginNotice()
+                    Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
                         value = phone,
                         onValueChange = onPhoneChange,
                         label = { Text("手机号") },
                         singleLine = true,
+                        enabled = false, // 官方登录接口已失效,输入框置灰
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -342,14 +345,14 @@ fun WaterScreen(
                             onValueChange = onCaptchaInputChange,
                             label = { Text("图形验证码") },
                             singleLine = true,
+                            enabled = false,
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(Modifier.width(10.dp))
                         Box(
                             Modifier
                                 .width(110.dp)
-                                .height(52.dp)
-                                .clickable { onRefreshCaptcha() },
+                                .height(52.dp),
                             contentAlignment = Alignment.Center,
                         ) {
                             val bmp = state.captchaBmp
@@ -374,6 +377,7 @@ fun WaterScreen(
                             onValueChange = onSmsCodeChange,
                             label = { Text("短信验证码") },
                             singleLine = true,
+                            enabled = false,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier.weight(1f),
@@ -381,15 +385,14 @@ fun WaterScreen(
                         Spacer(Modifier.width(10.dp))
                         Button(
                             onClick = onSendSms,
-                            enabled = smsCooldown <= 0 && !state.loading &&
-                                phone.length == 11 && captchaInput.isNotBlank(),
+                            enabled = false, // 登录暂不可用
                         ) {
                             Text(if (smsCooldown > 0) "重发(${smsCooldown}s)" else "发送")
                         }
                     }
                     Button(
                         onClick = onLogin,
-                        enabled = !state.loading && phone.length == 11 && smsCode.isNotBlank(),
+                        enabled = false, // 登录暂不可用
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(top = 16.dp)
@@ -410,7 +413,7 @@ fun WaterScreen(
                         )
                     }
                     Text(
-                        "登录慧生活798(校园直饮水服务)\n需要接收短信验证码;凭据仅保存在本机",
+                        "凭据仅保存在本机;官方接口恢复后这里会重新可用",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(top = 14.dp),
@@ -938,4 +941,49 @@ private fun Color.mixTowards(other: Color, t: Float): Color = Color(
 private fun deleteRed(): Color {
     val base = MaterialTheme.colorScheme.error
     return if (base.luminance() > 0.55f) base.mixTowards(DangerRed, 0.6f) else base
+}
+
+/** 官方登录接口(sign 校验)已升级,本应用无法完成手机号登录:引导去官方客户端。已登录(有 token)时不会走到这里。 */
+@androidx.compose.runtime.Composable
+private fun OfficialLoginNotice() {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val official = "com.cloudora.android"
+    val installed = androidx.compose.runtime.remember(ctx) {
+        runCatching { ctx.packageManager.getLaunchIntentForPackage(official) != null }.getOrDefault(false)
+    }
+    val cs = MaterialTheme.colorScheme
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(cs.secondaryContainer.copy(alpha = 0.55f))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Text(
+            "登录暂不可用",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = cs.onSecondaryContainer,
+        )
+        Text(
+            "慧生活798 的登录接口已升级,本应用无法完成验证。请在官方「慧生活798」App 里操作饮水机;已经登录过的账号不受影响。",
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+            color = cs.onSecondaryContainer.copy(alpha = 0.78f),
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        if (installed) {
+            androidx.compose.material3.TextButton(
+                onClick = {
+                    runCatching {
+                        ctx.startActivity(ctx.packageManager.getLaunchIntentForPackage(official))
+                    }
+                },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                modifier = Modifier.padding(top = 2.dp),
+            ) {
+                Text("打开慧生活798", fontSize = 12.sp)
+            }
+        }
+    }
 }

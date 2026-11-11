@@ -413,8 +413,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     fun loadWaterDevices(silent: Boolean = false) {
         if (waterToken.isBlank()) waterToken = settings.waterToken
         if (waterToken.isBlank()) {
+            // 官方登录接口已失效:这里不再兜底去拉图形验证码,否则每次进饮水页都会白打一次请求
             waterState = waterState.copy(loggedIn = false)
-            refreshCaptcha()
             return
         }
         // silent:列表已上屏的静默刷新,不清 message、不闪 loading
@@ -487,7 +487,6 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             devices = emptyList(),
             message = "登录已过期,请重新登录",
         )
-        refreshCaptcha()
     }
 
     fun washerRequestCaptcha() {
@@ -1746,9 +1745,8 @@ class MainActivity : ComponentActivity() {
             if (!vm.skippedLogin) vm.tryAutoLogin()
             if (vm.settings.waterToken.isNotBlank() || vm.skippedLogin) {
                 vm.loadWaterDevices()
-            } else {
-                vm.refreshCaptcha()
             }
+            // 官方登录接口已失效:进入饮水页不再请求图形验证码,避免一次无意义的网络请求
         }
 
         val notifPermLauncher = rememberLauncherForActivityResult(
