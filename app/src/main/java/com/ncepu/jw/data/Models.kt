@@ -27,10 +27,15 @@ fun parseWeeks(weeks: String): Set<Int>? {
 
 /** 学年学期。key 格式 "2026-2027-1",课表与成绩接口通用 */
 data class Semester(val year: Int, val term: Int) {
-    val key: String get() = "$year-${year + 1}-$term"
-    val displayName: String get() = "$year-${year + 1} 第${term}学期"
+    /** 哨兵学期:year=0 表示"全部学期"(成绩页用来一次看全部并算总学分绩) */
+    val isAll: Boolean get() = year == 0
+    val key: String get() = if (isAll) "all" else "$year-${year + 1}-$term"
+    val displayName: String get() = if (isAll) "全部学期" else "$year-${year + 1} 第${term}学期"
 
     companion object {
+        /** 全部学期(成绩页专用,课表/考试不要传) */
+        val ALL = Semester(0, 0)
+
         /** 依当前日期推断默认学年学期:9月起为第1学期,1-2月仍属上一年第1学期,3-6月第2学期,7-8月第3学期 */
         fun current(): Semester {
             val cal = java.util.Calendar.getInstance()

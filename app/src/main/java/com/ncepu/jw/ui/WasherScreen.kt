@@ -28,7 +28,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -56,6 +55,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kyant.backdrop.Backdrop
 import com.ncepu.jw.data.SavedWasher
 import com.ncepu.jw.data.UjingClient
 import com.ncepu.jw.data.WasherModel
@@ -109,6 +109,10 @@ fun WasherScreen(
     onDryTimeChange: (Int) -> Unit = {},
     onSetWasherNote: (String, String) -> Unit = { _, _ -> },
     onBack: () -> Unit,
+    /** 背景图开关:卡片底色交给 glassSurface(未开启时回退成圆角矩形衬底) */
+    bgEnabled: Boolean = false,
+    /** 毛玻璃采样源(MainActivity 的隐形壁纸副本) */
+    glassBackdrop: Backdrop? = null,
 ) {
     var noteTarget by remember { mutableStateOf<SavedWasher?>(null) }   // 正在改备注的设备
     var pendingRemove by remember { mutableStateOf<String?>(null) }     // 等着确认移除的设备
@@ -235,7 +239,12 @@ fun WasherScreen(
                 LazyColumn(Modifier.fillMaxSize()) {
                     // 1. 扫码/输设备号
                     item {
-                        Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        GlassCard(
+                            bgEnabled,
+                            glassBackdrop,
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(14.dp),
+                        ) {
                             Column(Modifier.padding(12.dp)) {
                                 Text("1. 添加设备(洗衣机/烘干机)", fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.height(6.dp))
@@ -254,7 +263,12 @@ fun WasherScreen(
                     // 已保存的洗衣机(点选即用)
                     if (state.savedWashers.isNotEmpty()) {
                         item {
-                            Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                            GlassCard(
+                                bgEnabled,
+                                glassBackdrop,
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                                shape = RoundedCornerShape(14.dp),
+                            ) {
                                 Column(Modifier.padding(12.dp)) {
                                     Text("我的设备", fontWeight = FontWeight.Bold)
                                     Spacer(Modifier.height(6.dp))
@@ -371,6 +385,8 @@ fun WasherScreen(
                                     OrderSection(
                                         title = if (state.isDryer) "2. 烘干程序" else "2. 洗涤模式",
                                         tail = if (state.isDryer) "请选择烘干程序" else "请选择洗涤模式",
+                                        bgEnabled = bgEnabled,
+                                        glassBackdrop = glassBackdrop,
                                     ) {
                                         state.models.chunked(4).forEach { rowModels ->
                                             Row(
@@ -394,7 +410,12 @@ fun WasherScreen(
                                 // 3. 选项组:洗衣液/除菌液/温度/筒自洁…,均由接口 additionDevices/additionParams 动态返回。
                                 //    加热机器的模型才带 washTemperatureId 组 → 温度选择只在其上出现;加购型额外给"不添加"。
                                 selectedModel?.additions?.forEach { group ->
-                                    OrderSection(title = group.name, tail = if (group.purchasable) "可选加购" else "请选择") {
+                                    OrderSection(
+                                        title = group.name,
+                                        tail = if (group.purchasable) "可选加购" else "请选择",
+                                        bgEnabled = bgEnabled,
+                                        glassBackdrop = glassBackdrop,
+                                    ) {
                                         val options: List<Pair<Int?, Pair<String, Int>>> = buildList {
                                             if (group.purchasable) add(null to ("不添加" to 0))
                                             group.options.forEach { add(it.id to (it.name to it.priceFen)) }
@@ -420,7 +441,12 @@ fun WasherScreen(
                                 }
                                 // 烘干时长(仅烘干机,分计时;下单以 dryTime=分钟×10 提交)
                                 if (state.isDryer) {
-                                    OrderSection(title = "烘干时长", tail = "分计时计费") {
+                                    OrderSection(
+                                        title = "烘干时长",
+                                        tail = "分计时计费",
+                                        bgEnabled = bgEnabled,
+                                        glassBackdrop = glassBackdrop,
+                                    ) {
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             listOf(30, 60, 90, 120).forEach { t ->
                                                 OptionChip(
@@ -457,7 +483,12 @@ fun WasherScreen(
                     // 6. 订单与支付
                     state.currentOrder?.let { order ->
                         item {
-                            Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                            GlassCard(
+                                bgEnabled,
+                                glassBackdrop,
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                                shape = RoundedCornerShape(14.dp),
+                            ) {
                                 Column(Modifier.padding(12.dp)) {
                                     Text("订单", fontWeight = FontWeight.Bold)
                                     Spacer(Modifier.height(6.dp))
@@ -591,8 +622,20 @@ fun WasherScreen(
 
 /** 下单配置区块(标题 + 右侧灰字 + 内容) */
 @Composable
-private fun OrderSection(title: String, tail: String, content: @Composable () -> Unit) {
-    Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+private fun OrderSection(
+    title: String,
+    tail: String,
+    bgEnabled: Boolean,
+    glassBackdrop: Backdrop?,
+    content: @Composable () -> Unit,
+) {
+    // 卡片底色统一走 glassSurface:未开背景图是圆角矩形衬底,开了是毛玻璃
+    GlassCard(
+        bgEnabled,
+        glassBackdrop,
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(14.dp),
+    ) {
         Column(Modifier.padding(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(title, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))

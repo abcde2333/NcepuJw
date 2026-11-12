@@ -677,6 +677,43 @@ class JwClient(private val baseUrl: String = DEFAULT_BASE) {
         GradesPage(parseGradeHtml(html))
     }
 
+    /**
+     * 一次拉「全部学期」成绩:与按学期查同一个接口,但四个筛选条件全空,
+     * 服务端把所有学期一起返回(每行自带 Grade.term)。学期下拉要"只列有成绩的学期",
+     * 就必须先知道全部成绩,不能按当前学期一个个问。
+     * 若该部署对空筛选返回空表,退回逐学期查询(往前 10 个学期)。
+     */
+    suspend fun fetchAllGrades(): GradesPage = withContext(Dispatchers.IO) {
+        // 入口页必须先访问,否则 cjcx_list 返回"出错了"页
+        get("/jsxsd/kscj/cjcx_frm", "$baseUrl/jsxsd/framework/xsMain.jsp").use { it.body?.string() }
+
+        suspend fun query(filters: Map<String, String>): List<Grade> {
+            val html = postForm("/jsxsd/kscj/cjcx_list", filters, "$baseUrl/jsxsd/kscj/cjcx_frm").use { r ->
+                val body = r.body?.string().orEmpty()
+                if (isSessionLost(body)) throw JwException("会话已失效,请重新登录")
+                if (!body.contains("dataList")) {
+                    val alert = ALERT_REGEX.find(body)?.groupValues?.get(1)?.trim()
+                    throw JwException(alert?.takeIf { it.isNotBlank() } ?: "成绩页面异常(HTTP ${r.code}),若提示评教请先完成评教")
+                }
+                body
+            }
+            return parseGradeHtml(html)
+        }
+
+        val all = query(mapOf("kksj" to "", "kcxz" to "", "kcmc" to "", "xsfs" to "all"))
+        if (all.isNotEmpty()) {
+            return@withContext GradesPage(all.distinctBy { "${it.term}|${it.course}|${it.score}" })
+        }
+        val acc = LinkedHashMap<String, Grade>()
+        for (sem in Semester.options(10)) {
+            val one = runCatching {
+                query(mapOf("xnm" to "${sem.year}-${sem.year + 1}", "xqm" to "${sem.term}"))
+            }.getOrNull() ?: continue
+            one.forEach { acc["${it.term}|${it.course}|${it.score}"] = it }
+        }
+        GradesPage(acc.values.toList())
+    }
+
     // ---------- HTML 解析 ----------
 
     /** 剥离 HTML 注释(教务页面里常有注释掉的 td/a,会干扰索引解析) */

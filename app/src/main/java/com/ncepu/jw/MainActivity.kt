@@ -88,7 +88,12 @@ import com.ncepu.jw.update.WasherWatchService
 import com.ncepu.jw.data.Grade
 import com.ncepu.jw.data.JwClient
 import com.ncepu.jw.data.JwException
+import com.ncepu.jw.data.BillUi
+import com.ncepu.jw.data.BillUiState
 import com.ncepu.jw.data.IlifeClient
+import com.ncepu.jw.data.IlifeSign
+import com.ncepu.jw.data.PointsUiState
+import com.ncepu.jw.data.WaterSubActions
 import com.ncepu.jw.data.UjingClient
 import okhttp3.OkHttpClient
 import org.json.JSONObject
@@ -209,6 +214,15 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     /** 成绩请求序号:切学期时旧响应作废(见 loadGrades) */
     private var gradeReqId = 0
     var grades by mutableStateOf<List<Grade>>(emptyList())
+    /** 全量成绩(所有学期一次拉回),学期下拉据此只列「真的出过分」的学期 */
+    var allGrades by mutableStateOf<List<Grade>>(emptyList())
+    /** 成绩页可选学期:仅含有成绩的学期,倒序 */
+    var gradeSemesters by mutableStateOf<List<Semester>>(emptyList())
+    private var gradeFetchedAt = 0L
+    /** 当前成绩来自本地缓存(登录失败/离线):页面据此提示"正在查看缓存" */
+    var gradeFromCache by mutableStateOf(false)
+    /** 成绩缓存写入时间(0 = 从未缓存过) */
+    var gradesCachedAt by mutableStateOf(0L)
 
     var selLoading by mutableStateOf(false)
     var selError by mutableStateOf<String?>(null)
@@ -224,6 +238,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     companion object {
         /** 选课缓存视为过期的时间(超时后进入选课页才再次请求) */
         private const val SEL_STALE_MS = 10 * 60_000L
+
+    /** 全量成绩的新鲜期:期内切学期不再请求 */
+    private const val GRADE_STALE_MS = 10 * 60_000L
         /** 考试安排视为新鲜的时间:进页面自动刷新在此之内直接跳过 */
         private const val EXAM_STALE_MS = 5 * 60_000L
     }
@@ -266,6 +283,26 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     var scanPendingRaw by mutableStateOf<String?>(null)
     private var waterToken by mutableStateOf("")
     private var waterCaptchaKey = IlifeClient.newCaptchaKey()
+
+    // ---------- 饮水页的积分 / 账单两个子页 ----------
+    /** 子页下标:0 饮水 / 1 积分 / 2 账单 */
+    var waterSubTab by mutableStateOf(0)
+
+    /** 积分会话 token(小程序通道 1,5),与 waterToken(设备会话 1,1)不通用 */
+    private var pointsToken by mutableStateOf("")
+    private var pointsUid by mutableStateOf("")
+    private var pointsCaptchaKey = IlifeClient.newCaptchaKey()
+    var pointsState by mutableStateOf(PointsUiState())
+    var billState by mutableStateOf(BillUiState())
+
+    /** 账单 id -> 抵扣金额:bill/lst-owner 不带 discount,补过一次详情就缓存住,刷新不重复打 */
+    private val billDeducts = HashMap<String, Double>()
+
+    /** 本月起点(毫秒),算本月积分抵扣合计用 */
+    private var billMonthStart = 0L
+
+    /** 每次进账单页最多补几笔详情(逐笔串行 120ms,别一次打满 50 个请求) */
+    private val BILL_DEDUCT_PROBE = 12
     var skippedLogin by mutableStateOf(false)   // 跳过教务登录(离线/仅用饮水机)
 
     init {
@@ -288,6 +325,15 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         // 考试安排:同步预载缓存垫底(没连校园网时进考试页直接有内容),
         // 进页面后仍会自动静默刷新一次,拿到新数据就覆盖
         runCatching { primeExamsFromCache() }
+        runCatching { primeGradesFromCache() }   // 成绩同理:先上缓存,联网成功再覆盖
+        // 积分/抵扣开关的持久值先读进来:进饮水页第一帧就按真实开关态显示,不用等网络
+        runCatching {
+            pointsState = pointsState.copy(
+                autoDaily = settings.waterAutoPoints,
+                autoDeduct = settings.waterAutoDeduct,
+                phone = settings.waterPointsPhone,
+            )
+        }
         // 启动时自动检查更新(12 小时节流,镜像站加速)
         viewModelScope.launch(Dispatchers.IO) { checkForUpdate(force = false) }
         // 启动即同步节假日(内部按 7 天/换年节流):只靠"刷课表后同步"会让装完新版没刷课表的用户
@@ -305,6 +351,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             while (true) {
                 kotlinx.coroutines.delay(1000)
                 if (waterSmsCooldown > 0) waterSmsCooldown--
+                if (pointsState.smsCooldown > 0) {
+                    pointsState = pointsState.copy(smsCooldown = pointsState.smsCooldown - 1)
+                }
                 if (washerSmsCooldown > 0) washerSmsCooldown--
             }
         }
@@ -331,6 +380,14 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
      */
     fun consumeWaterScan() {
         waterScanResult = null
+    }
+
+    /**
+     * 启动成功的涟漪/震动放完后回调。successTick 同样是"一次性事件":
+     * 不清掉的话,切回饮水页重新组合时 LaunchedEffect 会重放,于是每次进页面都震两下。
+     */
+    fun consumeWaterBurst() {
+        if (waterState.successTick != 0) waterState = waterState.copy(successTick = 0)
     }
 
     /** 改饮水机备注:只动本地显示名(设备号是机身码,改不了),不动顺序与在途状态 */
@@ -486,6 +543,522 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             loading = false,
             devices = emptyList(),
             message = "登录已过期,请重新登录",
+        )
+    }
+
+    // ================= 饮水页 · 积分 =================
+
+    /** 金额文案:退款方向(dir=2)前面加 +,支出不加符号 */
+    private fun moneyText(v: Double, refund: Boolean = false): String =
+        (if (refund) "+¥" else "¥") + String.format(java.util.Locale.US, "%.2f", kotlin.math.abs(v))
+
+    fun newPointsCaptcha() {
+        pointsCaptchaKey = IlifeClient.newCaptchaKey()
+        val url = ilife.captchaUrl(pointsCaptchaKey)
+        viewModelScope.launch {
+            val bmp: android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+                runCatching {
+                    val req = okhttp3.Request.Builder().url(url).build()
+                    client2.newCall(req).execute().use { r ->
+                        r.body?.byteStream()?.use { BitmapFactory.decodeStream(it) }
+                    }
+                }.getOrNull()
+            }
+            pointsState = pointsState.copy(captchaBmp = bmp?.asImageBitmap())
+        }
+    }
+
+    /** 积分通道发短信:走小程序通道(1,5),与设备通道的短信接口不是同一套版本号 */
+    fun pointsSendSms() {
+        if (pointsState.smsCooldown > 0) return
+        pointsState = pointsState.copy(loading = true, message = null)
+        viewModelScope.launch {
+            val r = ilife.sendSms(
+                pointsState.phone.trim(),
+                pointsState.captchaInput.trim(),
+                pointsCaptchaKey,
+                mini = true,
+            )
+            pointsState = pointsState.copy(
+                loading = false,
+                smsSent = r.ok,
+                smsCooldown = if (r.ok) 60 else 0,
+                message = if (r.ok) "短信已发送" else "发送失败:" + IlifeClient.readable(r.code, r.msg),
+            )
+        }
+    }
+
+    /** 积分通道登录:body 只有 {authCode, un},签名走 query(sign),多带字段会被判"请升级最新版" */
+    fun doPointsLogin() {
+        pointsState = pointsState.copy(loading = true, message = null)
+        viewModelScope.launch {
+            val r = ilife.login(pointsState.phone.trim(), pointsState.smsCode.trim(), mini = true)
+            if (!r.ok) {
+                newPointsCaptcha()
+                pointsState = pointsState.copy(
+                    loading = false,
+                    message = "登录失败:" + IlifeClient.readable(r.code, r.msg),
+                )
+                return@launch
+            }
+            val json = r.json ?: JSONObject()
+            val tk = ilife.extractToken(json)
+            val uid = ilife.extractUid(json)
+            if (tk.isBlank()) {
+                newPointsCaptcha()
+                pointsState = pointsState.copy(loading = false, message = "登录返回异常:未获取到凭证")
+                return@launch
+            }
+            pointsToken = tk
+            pointsUid = uid
+            settings.waterPointsToken = tk
+            settings.waterPointsUid = uid
+            settings.waterPointsPhone = pointsState.phone.trim()
+            pointsState = pointsState.copy(
+                loggedIn = true, loading = false, message = null,
+                smsCode = "", captchaInput = "", smsSent = false, smsCooldown = 0,
+            )
+            // 自动抵扣是账号级开关,登录后按本地开关态对齐一次服务端
+            if (pointsState.autoDeduct) runCatching { ilife.setUseScore(tk, true) }
+            loadPoints()
+        }
+    }
+
+    /** 拉积分任务列表。进度只认 mission-lst 里的 accScoreRsp,acc-score 的 daily 是上次结算快照 */
+    /** 积分任务运行中的 Job;点停止时取消 */
+    private var pointsJob: kotlinx.coroutines.Job? = null
+
+    /** 按 token 限流:同一 token 两次 score-send 至少间隔 30 秒(服务端 -98 频控) */
+    private val pointsNextAllowed = HashMap<String, Long>()
+
+    private fun reservePointsDelay(token: String): Long {
+        val now = System.currentTimeMillis()
+        val allowedAt = pointsNextAllowed[token] ?: now
+        val scheduledAt = maxOf(now, allowedAt)
+        pointsNextAllowed[token] = scheduledAt + 30_000L
+        return scheduledAt - now
+    }
+
+    /**
+     * 载入任务:双通道合并。积分通道(1,5)与设备通道(1,1)的任务列表互补,
+     * 同一 adId 只留一条,且 token 与通道必须同进同出(签名按通道选盐)。
+     */
+    private suspend fun loadPointsMerged(): IlifeClient.MissionPage? {
+        if (pointsToken.isBlank()) pointsToken = settings.waterPointsToken
+        if (pointsUid.isBlank()) pointsUid = settings.waterPointsUid
+        val pt = pointsToken
+        val at = waterToken.ifBlank { settings.waterToken }
+        val channels = ArrayList<Pair<String, Boolean>>()
+        if (pt.isNotBlank()) channels += pt to false
+        if (at.isNotBlank() && at != pt) channels += at to true
+        if (channels.isEmpty()) return null
+        val merged = LinkedHashMap<String, IlifeClient.Mission>()
+        var weekMask = 0
+        var dailyAdId = ""
+        var dailyScore = 5
+        var dailyToken = ""
+        var dailyApp = false
+        var loaded = 0
+        var validScore: Int? = null
+        var totalScore: Int? = null
+        for ((tok, isApp) in channels) {
+            val page = runCatching { ilife.missions(tok, pointsUid, isApp) }.getOrNull() ?: continue
+            loaded++
+            if (dailyAdId.isBlank() && page.dailyAdId.isNotBlank()) {
+                dailyAdId = page.dailyAdId
+                dailyScore = page.dailyScore
+                dailyToken = page.dailyToken.ifBlank { tok }
+                dailyApp = page.dailyApp
+            }
+            weekMask = weekMask or page.weekMask
+            validScore = validScore?.let { maxOf(it, page.validScore) } ?: page.validScore
+            totalScore = totalScore?.let { maxOf(it, page.totalScore) } ?: page.totalScore
+            for (m in page.missions) {
+                // 0 分任务不下发奖励,纯占列表位置,过滤掉
+                if (m.adId.isBlank() || m.dailySignin || m.score <= 0) continue
+                val old = merged[m.adId]
+                if (old == null) {
+                    merged[m.adId] = m
+                } else {
+                    val keep = old.limit > 0 || m.limit <= 0
+                    merged[m.adId] = old.copy(
+                        name = old.name.ifBlank { m.name },
+                        score = maxOf(old.score, m.score),
+                        limit = if (keep) old.limit else m.limit,
+                        done = maxOf(old.done, m.done),
+                        token = if (keep) old.token else m.token,
+                        app = if (keep) old.app else m.app,
+                    )
+                }
+            }
+        }
+        if (loaded == 0) return null
+        val now = System.currentTimeMillis() + ilife.timeOffsetMillis
+        val signedToday = (weekMask and IlifeSign.todayBit(now)) != 0
+        val list = ArrayList<IlifeClient.Mission>()
+        // 签到不是任务列表里的一项,按下发参数补一条伪任务,列表才完整
+        if (dailyAdId.isNotBlank()) {
+            list += IlifeClient.Mission(
+                adId = dailyAdId,
+                name = "每日签到",
+                score = dailyScore,
+                limit = 1,
+                done = if (signedToday) 1 else 0,
+                dailySignin = true,
+            )
+        }
+        list += merged.values
+        return IlifeClient.MissionPage(
+            missions = list,
+            validScore = validScore ?: 0,
+            totalScore = totalScore ?: 0,
+            dailyAdId = dailyAdId,
+            dailyScore = dailyScore,
+            signedToday = signedToday,
+            weekMask = weekMask,
+            dailyToken = dailyToken,
+            dailyApp = dailyApp,
+        )
+    }
+
+    fun loadPoints(silent: Boolean = false) {
+        if (pointsToken.isBlank()) pointsToken = settings.waterPointsToken
+        if (pointsUid.isBlank()) pointsUid = settings.waterPointsUid
+        if (pointsToken.isBlank()) {
+            pointsState = pointsState.copy(
+                loggedIn = false,
+                hint = "用慧生活798 账号登录,积分与饮水是同一个手机号",
+            )
+            return
+        }
+        pointsState = pointsState.copy(
+            loggedIn = true,
+            loading = !silent,
+            message = if (silent) pointsState.message else null,
+        )
+        viewModelScope.launch {
+            try {
+                val page = loadPointsMerged()
+                if (page == null) {
+                    pointsState = pointsState.copy(loading = false, message = "积分接口无响应,请稍后重试")
+                    return@launch
+                }
+                pointsState = pointsState.copy(
+                    loading = false,
+                    missions = page.missions,
+                    validScore = page.validScore,
+                    totalScore = page.totalScore,
+                    signedToday = page.signedToday,
+                    doneCount = page.missions.count { it.finished },
+                )
+                maybeAutoRunPoints(page, page.missions.count { !it.finished })
+            } catch (e: Exception) {
+                pointsState = pointsState.copy(loading = false, message = "加载失败:" + e.message)
+            }
+        }
+    }
+
+    /** 每日自动运行:同一天只跑一次(用本地日期做幂等键),开关关着就什么都不做 */
+    private fun maybeAutoRunPoints(page: IlifeClient.MissionPage, pendingCount: Int) {
+        if (!pointsState.autoDaily) return
+        val day = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US)
+            .format(java.util.Date())
+        if (settings.waterPointsDay == day) return
+        if (pendingCount == 0 && page.signedToday) {
+            settings.waterPointsDay = day
+            return
+        }
+        if (!pointsState.running) runAllPoints()
+    }
+
+    fun stopPoints() {
+        pointsJob?.cancel()
+        pointsJob = null
+        pointsState = pointsState.copy(
+            running = false,
+            runningName = "",
+            logs = pointsState.logs + pointsLogLine("已停止"),
+        )
+    }
+
+    private fun pointsLogLine(text: String): String {
+        val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        return "[" + t + "] " + text
+    }
+
+    /**
+     * 跑今日全部积分任务。按钮即开关:运行中再点会调用 stopPoints()。
+     * 节奏对齐官方 App:同 token 两次请求间隔 30 秒,-98 等 60 秒重试一次仍失败就跳过该任务;
+     * 收益不按标称分累加,每步都回查 acc-score 的 totalScore 增量做核验。
+     */
+    fun runAllPoints() {
+        if (pointsState.running) {
+            stopPoints()
+            return
+        }
+        val tk = pointsToken.ifBlank { settings.waterPointsToken.also { pointsToken = it } }
+        if (pointsUid.isBlank()) pointsUid = settings.waterPointsUid
+        if (tk.isBlank()) {
+            pointsState = pointsState.copy(message = "请先登录积分账号")
+            return
+        }
+        pointsState = pointsState.copy(running = true, runningName = "", message = null, logs = emptyList())
+        pointsNextAllowed.clear()
+        pointsJob = viewModelScope.launch {
+            val logs = ArrayList<String>()
+            fun log(s: String) {
+                logs += pointsLogLine(s)
+                if (logs.size > 120) logs.removeAt(0)
+                pointsState = pointsState.copy(logs = logs.toList())
+            }
+            var baseline: Int? = runCatching { ilife.pointsSummary(tk)?.second }.getOrNull()
+            var verified = 0
+            suspend fun verifyPoints(why: String) {
+                val total = runCatching { ilife.pointsSummary(tk)?.second }.getOrNull()
+                if (total == null) {
+                    log("[" + why + "] 到账核验失败,稍后统一核对")
+                    return
+                }
+                val base = baseline
+                if (base == null) {
+                    baseline = total
+                    return
+                }
+                val delta = total - base
+                if (delta > 0) {
+                    verified += delta
+                    baseline = total
+                    log("[" + why + "] 到账核验 +" + delta + " 分,本轮累计 " + verified + " 分")
+                } else {
+                    log("[" + why + "] 请求成功但积分未增加,可能已计过账")
+                }
+            }
+            try {
+                log("正在加载任务列表…")
+                val page = loadPointsMerged()
+                if (page == null) {
+                    log("任务列表加载失败")
+                    pointsState = pointsState.copy(running = false, runningName = "", message = "任务列表加载失败")
+                    return@launch
+                }
+                val signMission = page.missions.firstOrNull { it.dailySignin }
+                if (signMission != null && !signMission.finished && page.dailyAdId.isNotBlank()) {
+                    // 签到参数由哪个通道下发,签名就用哪个通道的 token 与盐
+                    val signTok = page.dailyToken.ifBlank { tk }
+                    val signApp = page.dailyApp
+                    val wait = reservePointsDelay(signTok)
+                    if (wait > 0) {
+                        log("等待 " + (wait / 1000) + " 秒后签到…")
+                        kotlinx.coroutines.delay(wait)
+                    }
+                    // 签到的周几是 1..7(周一=1),不是 0..6
+                    val weekDay = ((java.util.Calendar.getInstance(java.util.Locale.CHINA)
+                        .get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7) + 1
+                    log("每日签到:执行中…")
+                    var r = ilife.signIn(signTok, pointsUid, page.dailyAdId, page.dailyScore, weekDay, signApp)
+                    if (r.code == -98) {
+                        log("每日签到:请求频繁,等待 60 秒重试…")
+                        kotlinx.coroutines.delay(60_000L)
+                        r = ilife.signIn(signTok, pointsUid, page.dailyAdId, page.dailyScore, weekDay, signApp)
+                    }
+                    if (r.ok) {
+                        log("每日签到:请求成功,正在核验到账")
+                        verifyPoints("每日签到")
+                    } else {
+                        log("每日签到失败:" + IlifeClient.readable(r.code, r.msg))
+                    }
+                } else {
+                    log("每日签到:今日已签到")
+                }
+                val todo = page.missions.filter {
+                    !it.dailySignin && !it.finished && it.limit > 0 && it.score > 0 &&
+                        // 金融营销类任务直接跳过
+                        listOf("免费权益", "借贷", "贷款").none { k -> k in it.name }
+                }
+                log("共 " + todo.size + " 个可执行任务")
+                for (m in todo) {
+                    pointsState = pointsState.copy(runningName = m.name)
+                    val execToken = m.token.ifBlank { tk }
+                    var round = m.done
+                    var skipRest = false
+                    while (round < m.limit && !skipRest) {
+                        round++
+                        val wait = reservePointsDelay(execToken)
+                        if (wait > 0) {
+                            log("[" + m.name + "] 等待 " + (wait / 1000) + " 秒…")
+                            kotlinx.coroutines.delay(wait)
+                        }
+                        log("[" + m.name + "] (" + round + "/" + m.limit + ") 执行中…")
+                        var r = ilife.sendMission(execToken, pointsUid, m.adId, m.score, m.app)
+                        if (r.code == -98) {
+                            log("[" + m.name + "] 请求频繁,等待 60 秒重试…")
+                            kotlinx.coroutines.delay(60_000L)
+                            r = ilife.sendMission(execToken, pointsUid, m.adId, m.score, m.app)
+                        }
+                        if (r.ok) {
+                            log("[" + m.name + "] 请求成功,正在核验到账")
+                            verifyPoints(m.name)
+                        } else if (r.code == -98) {
+                            log("[" + m.name + "] 请求频繁,跳过剩余任务")
+                            skipRest = true
+                        } else {
+                            log("[" + m.name + "] 失败:" + IlifeClient.readable(r.code, r.msg))
+                        }
+                    }
+                }
+                val latest = runCatching { loadPointsMerged() }.getOrNull()
+                if (latest != null) {
+                    pointsState = pointsState.copy(
+                        missions = latest.missions,
+                        validScore = latest.validScore,
+                        totalScore = latest.totalScore,
+                        signedToday = latest.signedToday,
+                        doneCount = latest.missions.count { it.finished },
+                    )
+                }
+                log("任务请求结束,已核验本轮增加 " + verified + " 分")
+                settings.waterPointsDay = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US)
+                    .format(java.util.Date())
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                log("任务已停止")
+            } catch (e: Exception) {
+                log("异常:" + e.message)
+                pointsState = pointsState.copy(message = "执行中断:" + e.message)
+            } finally {
+                pointsState = pointsState.copy(running = false, runningName = "")
+                pointsJob = null
+            }
+        }
+    }
+
+    fun setAutoDailyPoints(on: Boolean) {
+        settings.waterAutoPoints = on
+        pointsState = pointsState.copy(autoDaily = on)
+        if (on) {
+            loadPoints(silent = true)
+        }
+    }
+
+    /** 自动积分抵扣:账号级开关,下发 acc/upt;失败要回滚开关态,否则界面骗人 */
+    fun setAutoDeductPoints(on: Boolean) {
+        val tk = pointsToken.ifBlank { settings.waterPointsToken }
+        settings.waterAutoDeduct = on
+        pointsState = pointsState.copy(autoDeduct = on)
+        if (tk.isBlank()) return
+        viewModelScope.launch {
+            val r = ilife.setUseScore(tk, on)
+            if (!r.ok) {
+                settings.waterAutoDeduct = !on
+                pointsState = pointsState.copy(
+                    autoDeduct = !on,
+                    message = "抵扣开关设置失败:" + IlifeClient.readable(r.code, r.msg),
+                )
+            }
+        }
+    }
+
+    // ================= 饮水页 · 账单 =================
+
+    /** 拉账单(bill/lst-owner,status=3 已付款),顺带算今日/昨日/本月三档消费 */
+    fun loadBills(silent: Boolean = false) {
+        if (waterToken.isBlank()) waterToken = settings.waterToken
+        if (waterToken.isBlank()) {
+            billState = billState.copy(loggedIn = false, loading = false)
+            return
+        }
+        billState = billState.copy(
+            loggedIn = true,
+            loading = !silent,
+            message = if (silent) billState.message else null,
+        )
+        viewModelScope.launch {
+            try {
+                val (list, total) = ilife.bills(waterToken, 0, 50)
+                val cal = java.util.Calendar.getInstance(java.util.Locale.CHINA)
+                cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+                cal.set(java.util.Calendar.MINUTE, 0)
+                cal.set(java.util.Calendar.SECOND, 0)
+                cal.set(java.util.Calendar.MILLISECOND, 0)
+                val todayStart = cal.timeInMillis
+                val yesterdayStart = todayStart - 24L * 60 * 60 * 1000
+                cal.set(java.util.Calendar.DAY_OF_MONTH, 1)
+                val monthStart = cal.timeInMillis
+                billMonthStart = monthStart
+                var today = 0.0
+                var yesterday = 0.0
+                var month = 0.0
+                var monthDeduct = 0.0
+                val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+                val items = list.map { b ->
+                    if (b.countsAsSpending) {
+                        if (b.time >= todayStart) today += b.payment
+                        else if (b.time >= yesterdayStart) yesterday += b.payment
+                        if (b.time >= monthStart) month += b.payment
+                    }
+                    // 抵扣:列表接口带就用列表的,没带就用之前补过详情的缓存
+                    val deduct = if (billDeducts.containsKey(b.id)) {
+                        billDeducts[b.id] ?: 0.0
+                    } else {
+                        b.discount
+                    }
+                    if (deduct > 0.0 && b.time >= monthStart) monthDeduct += deduct
+                    BillUi(
+                        id = b.id,
+                        title = b.title,
+                        timeText = if (b.time > 0L) fmt.format(java.util.Date(b.time)) else "",
+                        statusLine = b.statusLine,
+                        amountText = moneyText(b.payment, refund = b.dir == 2),
+                        deductText = if (deduct > 0.0) "积分抵扣 " + moneyText(deduct) else null,
+                        timeMillis = b.time,
+                    )
+                }
+                billState = billState.copy(
+                    loading = false,
+                    items = items,
+                    total = total,
+                    monthText = moneyText(month),
+                    todayText = moneyText(today),
+                    yesterdayText = moneyText(yesterday),
+                    monthDeductText = if (monthDeduct > 0.0) moneyText(monthDeduct) else null,
+                    message = if (items.isEmpty()) "暂无账单记录" else null,
+                )
+                // 列表接口不保证带 discount:补前几笔详情,补到了再把抵扣标与本月合计刷进去
+                probeBillDiscounts()
+            } catch (e: Exception) {
+                billState = billState.copy(loading = false, message = "加载失败:" + e.message)
+            }
+        }
+    }
+
+    /**
+     * 逐笔补积分抵扣金额。
+     * 只有 bill/view-full 的 data.bill.discount 是准的,一次最多补 [BILL_DEDUCT_PROBE] 笔(120ms 间隔串行),
+     * 补过的 id 记进 [billDeducts],刷新时不再重复打。
+     */
+    private suspend fun probeBillDiscounts() {
+        val todo = billState.items.filter { !billDeducts.containsKey(it.id) }.take(BILL_DEDUCT_PROBE)
+        if (todo.isEmpty()) return
+        var changed = false
+        for (b in todo) {
+            val d = try {
+                ilife.billDiscount(waterToken, b.id)
+            } catch (e: Exception) {
+                0.0
+            }
+            billDeducts[b.id] = d
+            if (d > 0.0) changed = true
+            kotlinx.coroutines.delay(120)
+        }
+        if (!changed) return
+        var monthDeduct = 0.0
+        val items = billState.items.map { b ->
+            val d = billDeducts[b.id] ?: 0.0
+            if (d > 0.0 && b.timeMillis >= billMonthStart) monthDeduct += d
+            b.copy(deductText = if (d > 0.0) "积分抵扣 " + moneyText(d) else b.deductText)
+        }
+        billState = billState.copy(
+            items = items,
+            monthDeductText = if (monthDeduct > 0.0) moneyText(monthDeduct) else null,
         )
     }
 
@@ -1012,22 +1585,24 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     private fun toggleWaterDevice(did: String, start: Boolean) {
         if (waterOps[did]?.isActive == true) return
         val now = System.currentTimeMillis()
-        if (now - (waterLastOpAt[did] ?: 0L) < 3000L) return  // 防连点触发频控
+        if (now - (waterLastOpAt[did] ?: 0L) < 1200L) return  // 防连点触发频控(1.2s:再长用户会以为按钮没反应)
         waterLastOpAt[did] = now
         setWaterRunning(did, start)
-        waterState = waterState.copy(loading = true, message = null)
+        waterState = waterState.copy(loading = false, message = null)
+        if (start) {
+            // 点下去立刻给反馈(涟漪 + 双段震动),不等网络返回:
+            // 之前 successTick 在请求成功后才 +1,接口慢的时候按了像没反应
+            waterIdle[did] = 0
+            waterState = waterState.copy(
+                successDid = did,
+                successTick = waterState.successTick + 1,
+            )
+        }
         waterOps[did] = viewModelScope.launch {
             try {
                 if (start) {
                     val r = ilife.start(waterToken, did)
-                    waterState = waterState.copy(loading = false)
                     if (r.ok) {
-                        waterIdle[did] = 0
-                        waterState = waterState.copy(
-                            message = "设备已启动,请接水",
-                            successDid = did,
-                            successTick = waterState.successTick + 1,
-                        )
                         ensureWaterPoller()
                     } else {
                         setWaterRunning(did, false)
@@ -1038,19 +1613,31 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 } else {
                     val r = ilife.end(waterToken, did)
                     setWaterRunning(did, false); waterIdle[did] = 0
-                    waterState = waterState.copy(
-                        loading = false,
-                        message = if (r.ok) "已结束出水" else "该设备可能已停止出水",
-                    )
+                    waterState = waterState.copy(loading = false)
+                    // 结束是一次性结果,不留在页面上:3s 后自动收起
+                    flashWaterMessage(if (r.ok) "已结束出水" else "该设备可能已停止出水")
                     ensureWaterPoller()
                 }
             } catch (e: Exception) {
                 waterState = waterState.copy(loading = false)
                 setWaterRunning(did, false)
-                waterState = waterState.copy(message = if (!start) "该设备可能已停止出水" else "启动异常:${e.message}")
+                if (!start) flashWaterMessage("该设备可能已停止出水")
+                else waterState = waterState.copy(message = "启动异常:${e.message}")
             } finally {
                 waterOps.remove(did)
             }
+        }
+    }
+
+    /**
+     * 一次性状态小字:显示 [millis] 毫秒后自动清掉。
+     * 到点先比对文本,期间若被新消息替换就不动它。
+     */
+    private fun flashWaterMessage(text: String, millis: Long = 3000L) {
+        waterState = waterState.copy(message = text)
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(millis)
+            if (waterState.message == text) waterState = waterState.copy(message = null)
         }
     }
 
@@ -1507,6 +2094,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     }
 
     fun loadGrades() {
+        primeGradesFromCache()             // 有缓存先上屏,别留空白页
         if (webvpnNeedsRelogin()) return   // 校外隧道未就绪:先惰性登录,登录后会自动重来
         // 请求学期快照 + 请求序号:快速切学期时,旧响应不能拿新学期的 key 去过滤,更不能覆盖当前结果
         val sem = gradeSem
@@ -1515,19 +2103,77 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         gradeError = null
         viewModelScope.launch {
             try {
-                val page = client.fetchGrades(sem)
-                if (reqId != gradeReqId) return@launch   // 过期响应:丢弃
-                grades = page.items.filter { it.term == sem.key }
+                // 一次拉全部学期:学期下拉要过滤空学期,必须知道每学期有没有成绩。
+                // 10 分钟内的数据直接复用,切学期不再发请求。
+                val fresh = allGrades.isNotEmpty() && System.currentTimeMillis() - gradeFetchedAt < GRADE_STALE_MS
+                if (!fresh) {
+                    val page = client.fetchAllGrades()
+                    if (reqId != gradeReqId) return@launch   // 过期响应:丢弃
+                    allGrades = page.items
+                    gradeFetchedAt = System.currentTimeMillis()
+                    // 全量成绩落本地缓存:下次进页面先上屏再看网络,离线也有得看
+                    runCatching { settings.cacheGrades(allGrades) }
+                    gradesCachedAt = settings.gradesCachedAtMillis
+                    gradeFromCache = false
+                    applyGradeSemesters()
+                }
+                if (reqId != gradeReqId) return@launch
+                grades = if (gradeSem.isAll) allGrades else allGrades.filter { it.term == gradeSem.key }
                 name = client.studentName ?: name
                 gradeError = null
             } catch (e: Exception) {
                 if (reqId != gradeReqId) return@launch
-                grades = emptyList()
-                gradeError = e.message ?: "加载失败"
+                if (primeGradesFromCache()) {
+                    // 有缓存就继续看缓存,不弹错页(顶部横幅给出原因与时间)
+                    gradeError = null
+                } else {
+                    grades = emptyList()
+                    gradeError = e.message ?: "加载失败"
+                }
             } finally {
                 if (reqId == gradeReqId) gradeLoading = false
             }
         }
+    }
+
+    /**
+     * 把成绩缓存灌进内存列表(离线查看/失败回退)。
+     * 内存里已有数据直接返回 true——它比缓存新。返回是否已可显示成绩。
+     */
+    private fun primeGradesFromCache(): Boolean {
+        if (allGrades.isNotEmpty()) return true
+        val cached = runCatching { settings.loadCachedGrades() }.getOrDefault(emptyList())
+        if (cached.isEmpty()) return false
+        allGrades = cached
+        gradesCachedAt = settings.gradesCachedAtMillis
+        gradeFromCache = true
+        applyGradeSemesters()
+        grades = if (gradeSem.isAll) allGrades else allGrades.filter { it.term == gradeSem.key }
+        return true
+    }
+
+    /** 「2025-2026-1」→ Semester(2025, 1);解析不出来返回 null(补重学期等异常值直接跳过) */
+    private fun semesterOfKey(term: String): Semester? {
+        val m = Regex("""(\d{4})-(\d{4})-(\d)""").find(term.trim()) ?: return null
+        val y = m.groupValues[1].toIntOrNull() ?: return null
+        val t = m.groupValues[3].toIntOrNull() ?: return null
+        return Semester(y, t)
+    }
+
+    /** 从全量成绩归纳「有成绩的学期」;当前选中学期不在其中时自动落到最新一个有成绩的学期 */
+    private fun applyGradeSemesters() {
+        val set = LinkedHashSet<Semester>()
+        for (g in allGrades) semesterOfKey(g.term)?.let { set += it }
+        // 第一项固定是「全部学期」:成绩页默认看全部,学分绩才是完整口径
+        gradeSemesters = listOf(Semester.ALL) +
+            set.sortedWith(compareByDescending<Semester> { it.year }.thenByDescending { it.term })
+        if (gradeSemesters.none { it.key == gradeSem.key }) gradeSem = Semester.ALL
+    }
+
+    /** 成绩页切学期:数据已在内存,不发请求 */
+    fun selectGradeSem(s: Semester) {
+        gradeSem = s
+        grades = if (s.isAll) allGrades else allGrades.filter { it.term == s.key }
     }
 
     /**
@@ -1881,6 +2527,8 @@ class MainActivity : ComponentActivity() {
                     }
                     composable("waterscan") {
                         WaterScanScreen(
+                            title = "扫描饮水机",
+                            hint = "将饮水机二维码放入框内即可自动识别",
                             onResult = { raw ->
                                 // 解析二维码里的设备编号(列表里已有这台就定位到它,否则回填添加框)
                                 vm.setWaterScan(raw)
@@ -1893,6 +2541,8 @@ class MainActivity : ComponentActivity() {
                         // 每次进入洗衣页时恢复已保存的登录态与设备列表
                         androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshWasherSaved() }
                         WasherScreen(
+                            // 自定义背景开启时卡片走毛玻璃衬底(无背景图为圆角实底)
+                            bgEnabled = appearance.bgHas,
                             state = vm.washerState,
                             onRemoveWasher = { did ->
                                 vm.settings.removeWasherDevice(did)
@@ -1939,6 +2589,8 @@ class MainActivity : ComponentActivity() {
                     }
                     composable("washerscan") {
                         WaterScanScreen(
+                            title = "扫描洗衣机",
+                            hint = "将洗衣机二维码放入框内即可自动识别",
                             onResult = { raw ->
                                 // scanWasherCode 需要二维码原始内容,这里不做归一化
                                 vm.washerScan(raw)
@@ -1958,6 +2610,7 @@ class MainActivity : ComponentActivity() {
                         // 每次进页面自动刷新一次:已有数据时静默(不闪转圈),5 分钟内不重复请求
                         LaunchedEffect(Unit) { vm.loadExams(silent = true) }
                         ExamScreen(
+                            bgEnabled = appearance.bgHas,
                             semesters = vm.semesters,
                             selected = vm.examSem,
                             loading = vm.examLoading,
@@ -1972,13 +2625,16 @@ class MainActivity : ComponentActivity() {
                     }
                     composable("grades") {
                         GradeScreen(
-                            semesters = vm.semesters,
+                            bgEnabled = appearance.bgHas,
+                            semesters = vm.gradeSemesters.ifEmpty { listOf(vm.gradeSem) },
                             selected = vm.gradeSem,
                             loading = vm.gradeLoading,
                             error = vm.gradeError,
                             grades = vm.grades,
-                            onSemesterChange = { vm.gradeSem = it; vm.loadGrades() },
+                            onSemesterChange = { vm.selectGradeSem(it) },
                             onRetry = { vm.loadGrades() },
+                            fromCache = vm.gradeFromCache,
+                            cachedAtMillis = vm.gradesCachedAt,
                             onEvaluate = {
                                 WebViewActivity.webSession = vm.client.cookieHeader()
                                 WebViewActivity.webvpnMode = vm.webvpnEnabled
@@ -2013,6 +2669,7 @@ class MainActivity : ComponentActivity() {
                     }
                     composable("about") {
                         AboutScreen(
+                            bgEnabled = appearance.bgHas,
                             versionName = com.ncepu.jw.update.Updater.currentVersionName(ctx),
                             versionCode = runCatching {
                                 ctx.packageManager.getPackageInfo(ctx.packageName, 0).longVersionCode
@@ -2535,7 +3192,12 @@ class MainActivity : ComponentActivity() {
                             tab = t
                             when (t) {
                             0 -> if (vm.allCourses.isEmpty() && !vm.skippedLogin) vm.loadSchedule()
-                            1 -> vm.loadWaterDevices(silent = vm.waterState.devices.isNotEmpty())
+                            1 -> {
+                                vm.loadWaterDevices(silent = vm.waterState.devices.isNotEmpty())
+                                // 上次停在积分/账单页时,进 tab 就把对应数据补上(subTab 没变不会触发 onSubTabChange)
+                                if (vm.waterSubTab == 1) vm.loadPoints(silent = true)
+                                if (vm.waterSubTab == 2) vm.loadBills(silent = true)
+                            }
                             2 -> if (vm.loggedIn) vm.loadSelection()
                             }
                         },
@@ -2634,9 +3296,36 @@ class MainActivity : ComponentActivity() {
                                 scanResult = vm.waterScanResult,
                                 scanTick = vm.waterScanTick,
                                 onScanConsumed = { vm.consumeWaterScan() },
+                                onBurstConsumed = { vm.consumeWaterBurst() },
                                 bgEnabled = showBg,
                                 glassBackdrop = glassBackdrop,
                         onDragActiveChange = { waterDragging = it },
+                                subTab = vm.waterSubTab,
+                                // 切子页时才拉数据:积分/账单一登录就有,未登录先看登录卡
+                                onSubTabChange = {
+                                    vm.waterSubTab = it
+                                    if (it == 1) vm.loadPoints(silent = true)
+                                    if (it == 2) vm.loadBills(silent = true)
+                                },
+                                points = vm.pointsState,
+                                bill = vm.billState,
+                                subActions = WaterSubActions(
+                                    onPointsPhoneChange = { vm.pointsState = vm.pointsState.copy(phone = it) },
+                                    onPointsSmsCodeChange = { vm.pointsState = vm.pointsState.copy(smsCode = it) },
+                                    onPointsCaptchaInputChange = { vm.pointsState = vm.pointsState.copy(captchaInput = it) },
+                                    onPointsRefreshCaptcha = { vm.newPointsCaptcha() },
+                                    onPointsSendSms = { vm.pointsSendSms() },
+                                    onPointsLogin = { vm.doPointsLogin() },
+                                    onPointsRefresh = { vm.loadPoints() },
+                                    onRunAllPoints = { vm.runAllPoints() },
+                                    onToggleAutoDaily = { vm.setAutoDailyPoints(it) },
+                                    onToggleAutoDeduct = { vm.setAutoDeductPoints(it) },
+                                    onBillsRefresh = { vm.loadBills() },
+                                    onBillsLogin = {
+                                        vm.waterSubTab = 0
+                                        vm.loadPoints(silent = true)
+                                    },
+                                ),
                             )
                             2 -> SelectionScreen(
                                 loggedIn = vm.loggedIn,

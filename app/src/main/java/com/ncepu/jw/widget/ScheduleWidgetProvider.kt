@@ -110,9 +110,11 @@ class ScheduleWidgetProvider : AppWidgetProvider() {
 
             applyStyle(views, store.widgetStyle)
 
-            // 整卡点击 → 打开 App(课表);饮水快捷按钮已移除(登录接口失效后没有可用入口)
+            // 整卡点击 → 打开 App(课表);右上角的「饮水」胶囊 → 直接进饮水页
+            // (tab 索引 0 课表 / 1 饮水,见 MainScaffold 的分发 when)
             views.setOnClickPendingIntent(R.id.widget_root, tapIntent(context, 0))
-            views.setViewVisibility(R.id.btn_water, android.view.View.GONE)
+            views.setViewVisibility(R.id.btn_water, View.VISIBLE)
+            views.setOnClickPendingIntent(R.id.btn_water, tapIntent(context, 1))
             return views
         }
 

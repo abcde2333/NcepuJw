@@ -4,10 +4,14 @@ import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -18,6 +22,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
@@ -25,6 +31,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -39,6 +46,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -89,6 +97,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import kotlin.math.PI
 import kotlin.math.sin
 import androidx.compose.ui.zIndex
@@ -101,6 +110,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ncepu.jw.data.Course
+import com.ncepu.jw.data.BillUiState
+import com.ncepu.jw.data.PointsUiState
+import com.ncepu.jw.data.WaterSubActions
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private const val BOTTOM_BAR_EXIT_MS = 220L   // 与 MainActivity 底栏 exit 动画时长对齐
 private const val DELETE_BAR_EXIT_MS = 200     // 删除条退场时长,须与下方 exit 里的 tween 一致
@@ -153,11 +170,18 @@ fun WaterScreen(
      * 不清的话,离开饮水页再回来 LaunchedEffect 会拿着同一个 scanResult 重跑,设备又被高亮一次。
      */
     onScanConsumed: () -> Unit = {},
+    onBurstConsumed: () -> Unit = {},
     /** 拖拽设备卡片时通知外层收起底栏,给底部删除条腾位置 */
     onDragActiveChange: (Boolean) -> Unit = {},
     /** 是否有背景图:决定设备卡片的毛玻璃采样与通透度(与课表/选课页同一套) */
     bgEnabled: Boolean = false,
     glassBackdrop: Backdrop? = null,
+    /** 子页下标:0 饮水 / 1 积分 / 2 账单。外层也能改(扫码后回饮水) */
+    subTab: Int = 0,
+    onSubTabChange: (Int) -> Unit = {},
+    points: PointsUiState = PointsUiState(),
+    bill: BillUiState = BillUiState(),
+    subActions: WaterSubActions = WaterSubActions(),
     onBack: (() -> Unit)? = null,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
@@ -223,6 +247,11 @@ fun WaterScreen(
             // 开了背景图时顶栏颜色由 Palette 定(见 HeaderPalette):标题、返回键、右上角图标一起跟着走
             val headerColor = LocalHeaderContentColor.current
             TopAppBar(
+                // 比默认 64dp 矮一截:这一页顶上是标题+胶囊+列表,顶栏多占的高度直接从内容里扣。
+                // 但状态栏 inset 必须由外面补进来:TopAppBar 自带 windowInsets,若这里仍限高 52dp,
+                // 状态栏(约 30dp)会把标题行一起吃掉——标题和右上角扫码/刷新被裁成一条(2026-11-12 实测)。
+                windowInsets = WindowInsets(0),
+                modifier = Modifier.statusBarsPadding().height(56.dp),
                 // 与选课页 SectionTitle 同款:加粗 + 一道很淡的文字阴影,背景图花哨时也不会被吃掉
                 title = {
                     Text(
@@ -305,6 +334,52 @@ fun WaterScreen(
         Column(Modifier.fillMaxSize()) {
             // 与选课页一致:没开背景图时,标题下补一道分割线
             if (!bgEnabled) HeaderDivider()
+            // ---------- 三个子页:顶部毛玻璃胶囊 + 左右滑动 ----------
+            val pager = rememberPagerState(initialPage = subTab, pageCount = { 3 })
+            val pagerScope = rememberCoroutineScope()
+            // 外层改 subTab(例如扫码回来)要带动 pager;反向滑动也要回报给外层
+            LaunchedEffect(subTab) {
+                if (pager.currentPage != subTab) pager.animateScrollToPage(subTab)
+            }
+            LaunchedEffect(pager.currentPage) {
+                if (pager.currentPage != subTab) onSubTabChange(pager.currentPage)
+            }
+            WaterSubTabs(
+                selected = pager.currentPage,
+                onSelect = { pagerScope.launch { pager.animateScrollToPage(it) } },
+                bgEnabled = bgEnabled,
+                backdrop = glassBackdrop,
+            )
+            HorizontalPager(
+                state = pager,
+                // 拖设备卡片排序时锁横滑:长按拖动会被 pager 抢手势
+                userScrollEnabled = draggingDid == null,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            ) { page ->
+                when (page) {
+                    1 -> PointsPage(
+                        state = points,
+                        onPhoneChange = subActions.onPointsPhoneChange,
+                        onSmsCodeChange = subActions.onPointsSmsCodeChange,
+                        onCaptchaInputChange = subActions.onPointsCaptchaInputChange,
+                        onRefreshCaptcha = subActions.onPointsRefreshCaptcha,
+                        onSendSms = subActions.onPointsSendSms,
+                        onLogin = subActions.onPointsLogin,
+                        onRefresh = subActions.onPointsRefresh,
+                        onRunAll = subActions.onRunAllPoints,
+                        onToggleAutoDaily = subActions.onToggleAutoDaily,
+                        onToggleAutoDeduct = subActions.onToggleAutoDeduct,
+                        bgEnabled = bgEnabled,
+                        glassBackdrop = glassBackdrop,
+                    )
+                    2 -> BillPage(
+                        state = bill,
+                        onRefresh = subActions.onBillsRefresh,
+                        onLogin = subActions.onBillsLogin,
+                        bgEnabled = bgEnabled,
+                        glassBackdrop = glassBackdrop,
+                    )
+                    else -> Box(Modifier.fillMaxSize()) {
             if (!state.loggedIn) {
                 // ---------- 登录 ----------
                 // 登录表单也做成液态玻璃卡片:垫在背景图上折射 + 透镜边缘,和悬浮底栏同一套配方;
@@ -324,14 +399,13 @@ fun WaterScreen(
                         )
                         .padding(16.dp),
                 ) {
-                    OfficialLoginNotice()
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(4.dp))
                     OutlinedTextField(
                         value = phone,
                         onValueChange = onPhoneChange,
                         label = { Text("手机号") },
                         singleLine = true,
-                        enabled = false, // 官方登录接口已失效,输入框置灰
+                        enabled = !state.loading,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -345,14 +419,17 @@ fun WaterScreen(
                             onValueChange = onCaptchaInputChange,
                             label = { Text("图形验证码") },
                             singleLine = true,
-                            enabled = false,
+                            enabled = !state.loading,
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(Modifier.width(10.dp))
                         Box(
                             Modifier
                                 .width(110.dp)
-                                .height(52.dp),
+                                .height(52.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                // 点图刷新:图形验证码是一次性的,失败后必须能换一张
+                                .clickable { onRefreshCaptcha() },
                             contentAlignment = Alignment.Center,
                         ) {
                             val bmp = state.captchaBmp
@@ -377,7 +454,7 @@ fun WaterScreen(
                             onValueChange = onSmsCodeChange,
                             label = { Text("短信验证码") },
                             singleLine = true,
-                            enabled = false,
+                            enabled = !state.loading,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier.weight(1f),
@@ -385,14 +462,14 @@ fun WaterScreen(
                         Spacer(Modifier.width(10.dp))
                         Button(
                             onClick = onSendSms,
-                            enabled = false, // 登录暂不可用
+                            enabled = smsCooldown == 0 && phone.isNotBlank() && !state.loading,
                         ) {
                             Text(if (smsCooldown > 0) "重发(${smsCooldown}s)" else "发送")
                         }
                     }
                     Button(
                         onClick = onLogin,
-                        enabled = false, // 登录暂不可用
+                        enabled = phone.isNotBlank() && smsCode.isNotBlank() && !state.loading,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(top = 16.dp)
@@ -404,16 +481,13 @@ fun WaterScreen(
                             Text("登录(慧生活798)")
                         }
                     }
-                    state.message?.let {
-                        Text(
-                            it,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(top = 10.dp),
-                        )
-                    }
+                    AnimatedMessage(
+                        message = state.message,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
                     Text(
-                        "凭据仅保存在本机;官方接口恢复后这里会重新可用",
+                        "凭据仅保存在本机;token 约 4~5 天过期,过期后需重新登录",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(top = 14.dp),
@@ -421,6 +495,9 @@ fun WaterScreen(
                 }
             } else {
                 // ---------- 设备列表 ----------
+                // 必须按列排:标题、提示、列表是三段。放进 Box 会全部从顶端起画,
+                // 列表(fillMaxSize)直接压住「我的设备」和提示文字(2026-11-12 截图问题)。
+                Column(Modifier.fillMaxSize()) {
                 Row(
                     // 层级:顶栏「饮水机」= titleLarge(页面标题),这里「我的设备」降到 titleMedium(区块标题)。
                     // 间距只走 4/24:段与段之间 24dp(顶栏 -> 我的设备),同段内 4dp(我的设备 -> 提示 / 提示 -> 列表)
@@ -444,16 +521,13 @@ fun WaterScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                 }
-                state.message?.let {
-                    Text(
-                        it,
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp),
-                    )
-                }
+                // 结束出水/启动失败的小字:淡入 + 高度展开,消失时同样收起,避免列表整块跳一下
+                AnimatedMessage(
+                    message = state.message,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp),
+                )
                 if (state.loading && state.devices.isEmpty()) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
                 } else if (state.devices.isEmpty()) {
@@ -461,7 +535,7 @@ fun WaterScreen(
                         Icons.Filled.WaterDrop,
                         "暂无设备",
                         "点右上角扫码图标,对着机身二维码扫一下即可添加",
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxWidth().weight(1f),
                     )
                 } else {
                     // 长按卡片即可拖动排序;拖到屏幕底部的红色删除条上松手 = 移除该设备
@@ -475,7 +549,7 @@ fun WaterScreen(
                     // 悬浮底栏压在内容上:把底栏实高留出来,最后一张设备卡才不会被底栏盖住
                     LazyColumn(
                         state = lazyListState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxWidth().weight(1f),
                         contentPadding = PaddingValues(top = 4.dp, bottom = LocalBottomBarInset.current + 8.dp),
                     ) {
                         itemsIndexed(state.devices, key = { _, d -> d.first }) { index, (did, name, running) ->
@@ -636,6 +710,7 @@ fun WaterScreen(
                                                     trigger = if (state.successDid == did) state.successTick else 0,
                                                     color = MaterialTheme.colorScheme.primary,
                                                     modifier = Modifier.matchParentSize(),
+                                                    onConsumed = onBurstConsumed,
                                                 )
                                             }
                                         }
@@ -650,8 +725,11 @@ fun WaterScreen(
                         item { Spacer(Modifier.height(24.dp)) }
                     }
                 }
+                }
             }
-
+                    }
+                }
+            }
         }
 
             // 删除条:只在长按拖拽时从底部升起,常态不占位
@@ -856,6 +934,27 @@ private fun AddDeviceDialog(
     )
 }
 
+/**
+ * 一行状态小字(开始/结束/失败提示)。
+ * 退出时 message 已经是 null,所以自己留一份最后的文本,否则文字先消失再收起 = 跳变。
+ */
+@Composable
+private fun AnimatedMessage(
+    message: String?,
+    modifier: Modifier = Modifier,
+    color: Color = MaterialTheme.colorScheme.primary,
+) {
+    var last by remember { mutableStateOf("") }
+    if (message != null) last = message
+    AnimatedVisibility(
+        visible = message != null,
+        enter = fadeIn(tween(160)) + expandVertically(tween(180)),
+        exit = fadeOut(tween(140)) + shrinkVertically(tween(180)),
+    ) {
+        Text(last, fontSize = 12.sp, color = color, modifier = modifier)
+    }
+}
+
 /** 水滴状态图标:出水中做呼吸动画。单独成 composable 是为了把每帧重组限制在图标,不带着整张卡片重算 */
 @Composable
 private fun DropIcon(running: Boolean) {
@@ -883,16 +982,36 @@ private fun DropIcon(running: Boolean) {
  * 只用 Canvas + Animatable,不引 Lottie:构建走 --offline,多一个依赖就多一次联网风险。
  */
 @Composable
-private fun WaterStartBurst(trigger: Int, color: Color, modifier: Modifier = Modifier) {
-    if (trigger <= 0) return
+private fun WaterStartBurst(
+    trigger: Int,
+    color: Color,
+    modifier: Modifier = Modifier,
+    onConsumed: () -> Unit = {},
+) {
     val haptic = LocalHapticFeedback.current
+    val view = LocalView.current
     val p = remember { Animatable(0f) }
+    // 涟漪动画放在组合作用域里跑,而不是 LaunchedEffect 内部:trigger 归零会重启 LaunchedEffect,
+    // 写在里面的话动画会被一起取消,断在半路上。
+    val scope = rememberCoroutineScope()
     LaunchedEffect(trigger) {
-        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-        p.snapTo(0f)
-        p.animateTo(1f, tween(BURST_MS))
-        // 归零让常态不占绘制;若中途来了新 trigger,上面这行会被取消,不会走到这里
-        p.snapTo(0f)
+        if (trigger <= 0) return@LaunchedEffect
+        // 先消费再播:动画播到一半离开饮水页,tick 已经归零,重进不会重放震动
+        onConsumed()
+        // 启动成功的反馈只用触觉:API 30+ 连打两下 CONFIRM(短促双击感),低版本退回长按震动
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            view.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
+            delay(90)
+            view.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
+        } else {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
+        scope.launch {
+            p.snapTo(0f)
+            p.animateTo(1f, tween(BURST_MS))
+            // 归零让常态不占绘制
+            p.snapTo(0f)
+        }
     }
     // 进度在组合阶段读:每帧只重组这一个叶子 composable,不依赖绘制期的状态观察
     val t = p.value
@@ -983,6 +1102,77 @@ private fun OfficialLoginNotice() {
                 modifier = Modifier.padding(top = 2.dp),
             ) {
                 Text("打开慧生活798", fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+/**
+ * 子页胶囊:毛玻璃底 + 三个等宽圆角块。
+ * 底色走 glassSurface(没背景图是圆角衬底,有背景图是折射模糊),与底栏同一套配方。
+ */
+@Composable
+private fun WaterSubTabs(
+    selected: Int,
+    onSelect: (Int) -> Unit,
+    bgEnabled: Boolean,
+    backdrop: Backdrop?,
+) {
+    val labels = listOf("饮水", "积分", "账单")
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 8.dp)
+            .height(40.dp)
+            .glassSurface(
+                bgEnabled = bgEnabled,
+                backdrop = backdrop,
+                shape = RoundedCornerShape(percent = 50),
+                liquid = true,
+            )
+            .padding(4.dp),
+    ) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val segW = maxWidth / labels.size
+            // 选中块是同一块滑块在跑,不是三个块各自换色——滑动才连得上左右手势
+            val slideX by animateDpAsState(
+                targetValue = segW * selected,
+                animationSpec = tween(durationMillis = 260),
+                label = "subTabX",
+            )
+            Box(
+                Modifier
+                    .offset(x = slideX)
+                    .width(segW)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(percent = 50))
+                    .background(MaterialTheme.colorScheme.primary),
+            )
+            Row(Modifier.fillMaxSize()) {
+                labels.forEachIndexed { i, label ->
+                    val active = i == selected
+                    val textColor by animateColorAsState(
+                        targetValue = if (active) MaterialTheme.colorScheme.onPrimary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        animationSpec = tween(durationMillis = 200),
+                        label = "subTabColor$i",
+                    )
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(percent = 50))
+                            .clickable { onSelect(i) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            label,
+                            fontSize = 13.sp,
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                            color = textColor,
+                        )
+                    }
+                }
             }
         }
     }

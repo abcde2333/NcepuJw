@@ -17,10 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -31,6 +28,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kyant.backdrop.Backdrop
 import com.ncepu.jw.data.Exam
 import com.ncepu.jw.data.Semester
 
@@ -48,6 +46,10 @@ fun ExamScreen(
     /** 列表来自本地缓存(没连校园网):在标题下说明数据来源,别让人误以为是最新的 */
     fromCache: Boolean = false,
     cachedAtMillis: Long = 0L,
+    /** 背景图开关:卡片底色交给 glassSurface(未开启时回退成圆角矩形衬底) */
+    bgEnabled: Boolean = false,
+    /** 毛玻璃采样源(MainActivity 的隐形壁纸副本) */
+    glassBackdrop: Backdrop? = null,
 ) {
     Column(Modifier.fillMaxSize()) {
         SemesterBar(
@@ -139,10 +141,12 @@ fun ExamScreen(
             items(exams.size, key = { exams[it].code + exams[it].timeText + it }) { i ->
                 val e = exams[i]
                 Column(Modifier.fillMaxWidth()) {
-                    Card(
+                    // 底色交给 glassSurface:未开背景图是圆角矩形衬底,开了是毛玻璃
+                    GlassCard(
+                        bgEnabled,
+                        glassBackdrop,
                         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                        shape = RoundedCornerShape(14.dp),
                     ) {
                         Column(Modifier.padding(12.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {

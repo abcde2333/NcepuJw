@@ -64,9 +64,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kyant.backdrop.Backdrop
 import com.materialkolor.dynamicColorScheme
 import com.ncepu.jw.data.NavBarShape
 import com.ncepu.jw.data.NavMaterial
@@ -134,6 +136,10 @@ fun SettingsScreen(
     onTimesChange: (List<String>) -> Unit,
     onWeekStartChange: (Long) -> Unit,
     onBack: () -> Unit,
+    /** 背景图开关(与 hasBackground 同义,由 MainActivity 统一传入) */
+    bgEnabled: Boolean = hasBackground,
+    /** 毛玻璃采样源(MainActivity 的隐形壁纸副本) */
+    glassBackdrop: Backdrop? = null,
 ) {
     var showTimeDialog by remember { mutableStateOf(false) }
     var showDateDialog by remember { mutableStateOf(false) }
@@ -161,10 +167,16 @@ fun SettingsScreen(
 
         // ---------- 外观 ----------
         stickyHeader(key = "sec1") {
-            val bandBg =
-                if (hasBackground) MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
+            // 吸顶分组带:底色交给 glassSurface(未开背景图=不透明衬底,开了=毛玻璃),
+            // 吸顶遮罩语义不变(必须挡住下方滚过的内容)
+            val bandTint =
+                if (bgEnabled) MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
                 else MaterialTheme.colorScheme.surface
-            Column(Modifier.fillMaxWidth().background(bandBg)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .glassSurface(bgEnabled, glassBackdrop, shape = RectangleShape, tintOverride = bandTint),
+            ) {
                 SectionHeader(Icons.Filled.Palette, "外观")
                 HorizontalDivider()
             }
@@ -343,10 +355,16 @@ fun SettingsScreen(
 
         // ---------- 课表 ----------
         stickyHeader(key = "sec2") {
-            val bandBg =
-                if (hasBackground) MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
+            // 吸顶分组带:底色交给 glassSurface(未开背景图=不透明衬底,开了=毛玻璃),
+            // 吸顶遮罩语义不变(必须挡住下方滚过的内容)
+            val bandTint =
+                if (bgEnabled) MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
                 else MaterialTheme.colorScheme.surface
-            Column(Modifier.fillMaxWidth().background(bandBg)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .glassSurface(bgEnabled, glassBackdrop, shape = RectangleShape, tintOverride = bandTint),
+            ) {
                 SectionHeader(Icons.Filled.CalendarMonth, "课表")
                 HorizontalDivider()
             }
@@ -439,10 +457,16 @@ fun SettingsScreen(
 
         // ---------- 提醒 ----------
         stickyHeader(key = "sec3") {
-            val bandBg =
-                if (hasBackground) MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
+            // 吸顶分组带:底色交给 glassSurface(未开背景图=不透明衬底,开了=毛玻璃),
+            // 吸顶遮罩语义不变(必须挡住下方滚过的内容)
+            val bandTint =
+                if (bgEnabled) MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
                 else MaterialTheme.colorScheme.surface
-            Column(Modifier.fillMaxWidth().background(bandBg)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .glassSurface(bgEnabled, glassBackdrop, shape = RectangleShape, tintOverride = bandTint),
+            ) {
                 SectionHeader(Icons.Filled.Alarm, "提醒")
                 HorizontalDivider()
             }
@@ -513,10 +537,16 @@ fun SettingsScreen(
 
         // ---------- 网络 ----------
         stickyHeader(key = "sec4") {
-            val bandBg =
-                if (hasBackground) MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
+            // 吸顶分组带:底色交给 glassSurface(未开背景图=不透明衬底,开了=毛玻璃),
+            // 吸顶遮罩语义不变(必须挡住下方滚过的内容)
+            val bandTint =
+                if (bgEnabled) MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
                 else MaterialTheme.colorScheme.surface
-            Column(Modifier.fillMaxWidth().background(bandBg)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .glassSurface(bgEnabled, glassBackdrop, shape = RectangleShape, tintOverride = bandTint),
+            ) {
                 SectionHeader(Icons.Filled.Public, "网络")
                 HorizontalDivider()
             }

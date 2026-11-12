@@ -22,7 +22,6 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -41,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kyant.backdrop.Backdrop
 
 private const val REPO_URL = "https://github.com/abcde2333/NcepuJw"
 private const val REPO_LABEL = "github.com/abcde2333/NcepuJw"
@@ -55,6 +55,10 @@ fun AboutScreen(
     onCheckUpdate: () -> Unit = {},
     onUpdateAction: () -> Unit = {},
     onBack: () -> Unit,
+    /** 背景图开关:卡片底色交给 glassSurface(未开启时回退成圆角矩形衬底) */
+    bgEnabled: Boolean = false,
+    /** 毛玻璃采样源(MainActivity 的隐形壁纸副本) */
+    glassBackdrop: Backdrop? = null,
 ) {
     val ctx = LocalContext.current
     Scaffold(
@@ -90,12 +94,20 @@ fun AboutScreen(
             )
             Spacer(Modifier.height(24.dp))
 
-            AboutCard(Icons.Filled.Info, "版本信息", "版本 $versionName（构建 $versionCode）")
+            AboutCard(
+                Icons.Filled.Info,
+                "版本信息",
+                "版本 $versionName（构建 $versionCode）",
+                bgEnabled = bgEnabled,
+                glassBackdrop = glassBackdrop,
+            )
 
             AboutCard(
                 Icons.Filled.SystemUpdate,
                 "获取更新",
                 "GitHub 主站不可用时,自动改用镜像下载;下载完成后按提示安装",
+                bgEnabled = bgEnabled,
+                glassBackdrop = glassBackdrop,
             ) {
                 Spacer(Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -108,7 +120,13 @@ fun AboutScreen(
                 }
             }
 
-            AboutCard(Icons.Filled.Code, "开源地址", REPO_LABEL) {
+            AboutCard(
+                Icons.Filled.Code,
+                "开源地址",
+                REPO_LABEL,
+                bgEnabled = bgEnabled,
+                glassBackdrop = glassBackdrop,
+            ) {
                 Row(
                     Modifier
                         .padding(top = 4.dp)
@@ -144,6 +162,8 @@ fun AboutScreen(
                 "NcepuJw 是一款开源的华电教务助手,源代码基于 GNU General Public License " +
                     "v3.0(或更新版本)发布。你可以自由使用、修改和分发本软件;" +
                     "分发修改版时须以相同协议公开源代码。协议全文见仓库根目录 LICENSE。",
+                bgEnabled = bgEnabled,
+                glassBackdrop = glassBackdrop,
             )
 
             Spacer(Modifier.height(10.dp))
@@ -164,14 +184,18 @@ private fun AboutCard(
     icon: ImageVector,
     title: String,
     subtitle: String,
+    bgEnabled: Boolean,
+    glassBackdrop: Backdrop?,
     extra: (@Composable () -> Unit)? = null,
 ) {
-    Card(
+    // 卡片底色统一走 glassSurface:未开背景图是圆角矩形衬底,开了是毛玻璃
+    GlassCard(
+        bgEnabled,
+        glassBackdrop,
         Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
-        shape = MaterialTheme.shapes.large,
-        colors = profileCardColors(),
+        shape = RoundedCornerShape(16.dp),
     ) {
         Row(
             Modifier.fillMaxWidth().padding(16.dp),

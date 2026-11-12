@@ -79,10 +79,6 @@ import com.ncepu.jw.data.Course
 import com.ncepu.jw.data.Semester
 import com.ncepu.jw.data.parseWeeks
 import com.kyant.backdrop.Backdrop
-import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.vibrancy
-import com.kyant.backdrop.isRenderEffectSupported
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -351,30 +347,19 @@ fun ScheduleScreen(
             }
         }
 
-        // 背景图模式下:信息栏与网格共用一块衬底。拿到折射源且系统支持 RenderEffect(API 31+)
-        // 时做成真毛玻璃——壁纸采样后去饱和+模糊再压一层 surface 色调;不支持时退回半透明纯色,
-        // 否则低版本上会垫一张没糊的壁纸,课卡文字直接读不出来。
+        // 背景图模式下:信息栏与网格共用一块衬底,底色交给 glassSurface(与全 App 其它卡片
+        // 同一实现)。拿到折射源且系统支持 RenderEffect(API 31+)时是真毛玻璃——壁纸采样后
+        // 去饱和+模糊再压一层 surface 色调;不支持时退回半透明纯色,否则低版本上会垫一张没糊
+        // 的壁纸,课卡文字直接读不出来。未开背景图时衬底透明,保持原观感。
         val panelShape = RoundedCornerShape(16.dp)
         val panelTint = if (bgEnabled) MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)
         else Color.Transparent
-        val glass = glassBackdrop.takeIf { bgEnabled && it != null && isRenderEffectSupported() }
         Column(
             Modifier
                 .fillMaxWidth()
                 .weight(1f)
                 .padding(horizontal = 6.dp)
-                .background(panelTint, panelShape)
-                .then(
-                    if (glass != null) Modifier.drawBackdrop(
-                        backdrop = glass,
-                        shape = { panelShape },
-                        effects = {
-                            vibrancy()
-                            blur(22f.dp.toPx())
-                        },
-                        onDrawSurface = { drawRect(panelTint) },
-                    ) else Modifier
-                )
+                .glassSurface(bgEnabled, glassBackdrop, panelShape, tintOverride = panelTint)
                 .padding(bottom = 8.dp),
         ) {
             // ---- 信息栏:翻页 / 全部周次 + 右侧工具组 ----

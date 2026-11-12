@@ -66,7 +66,10 @@ internal val CardShape = RoundedCornerShape(20.dp)
 /** 有背景图时衬底的通透度,与课表页面板一致 */
 internal const val TINT_ALPHA_WITH_BG = 0.52f
 
-/** 没背景图时衬底不采样任何东西,压得实一点,免得卡片糊成一片 */
+/**
+ * 没背景图时衬底不再用 surface:主题里 surface 与 background 同色(深浅色都是),
+ * 卡片边界根本看不出来。改用 surfaceContainerHigh 这一档容器色,圆角矩形才立得住。
+ */
 internal const val TINT_ALPHA_PLAIN = 0.86f
 
 @Composable
@@ -243,9 +246,13 @@ internal fun Modifier.glassSurface(
     /** 液态玻璃:在毛玻璃之上再叠一层透镜折射,边缘会"吸住"背景(与悬浮底栏同一套配方) */
     liquid: Boolean = false,
 ): Modifier {
-    val tint = tintOverride ?: MaterialTheme.colorScheme.surface.copy(
-        alpha = if (bgEnabled) TINT_ALPHA_WITH_BG else TINT_ALPHA_PLAIN,
-    )
+    // 有背景图:半透明 surface 压一层毛玻璃;没背景图:直接用容器色当圆角矩形底。
+    // 以前没背景图时也走 surface@0.86,而 surface≈background,卡片等于没有背景。
+    val tint = tintOverride ?: if (bgEnabled) {
+        MaterialTheme.colorScheme.surface.copy(alpha = TINT_ALPHA_WITH_BG)
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerHigh
+    }
     val glass = backdrop.takeIf { bgEnabled && it != null && isRenderEffectSupported() }
     val base = clip(shape).background(tint, shape)
     return base.then(

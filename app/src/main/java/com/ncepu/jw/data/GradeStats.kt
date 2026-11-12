@@ -34,13 +34,17 @@ object GradeStats {
         val counted: Int,
     )
 
-    /** 学分或成绩无法解析的课程整条不计入（与教务"已修"口径一致） */
-    fun summarize(grades: List<Grade>): Summary {
+    /**
+     * 学分或成绩无法解析的课程整条不计入（与教务"已修"口径一致）。
+     * [mustOnly] = true 时只算课程性质带「必修」的课 —— 学校口径的「学分绩」只看必修课。
+     */
+    fun summarize(grades: List<Grade>, mustOnly: Boolean = false): Summary {
         var creditSum = 0.0
         var weightedScore = 0.0
         var weightedPoint = 0.0
         var counted = 0
         for (g in grades) {
+            if (mustOnly && !g.type.contains("必修")) continue
             val credit = g.credit.toDoubleOrNull() ?: continue
             val score = toScore(g.score) ?: continue
             if (credit <= 0.0) continue

@@ -58,10 +58,18 @@ class SettingsStore(context: Context) {
         const val KEY_WATER_TOKEN = "water_token"
         const val KEY_WATER_DEVICES = "water_devices"
         const val KEY_WATER_ORDER = "water_order"
+        const val KEY_WATER_POINTS_TOKEN = "water_points_token" // 积分会话 token(小程序通道 1,5)
+        const val KEY_WATER_POINTS_UID = "water_points_uid"
+        const val KEY_WATER_POINTS_PHONE = "water_points_phone"
+        const val KEY_WATER_AUTO_POINTS = "water_auto_points"   // 每日自动跑积分任务
+        const val KEY_WATER_AUTO_DEDUCT = "water_auto_deduct"   // 自动积分抵扣
+        const val KEY_WATER_POINTS_DAY = "water_points_day"     // 自动任务上次跑过的日期(yyyyMMdd)
         const val KEY_WASHER_TOKEN = "washer_token"
         const val KEY_WASHER_DEVICES = "washer_devices"
         const val KEY_EXAM_CACHE = "exam_cache"
         const val KEY_EXAM_CACHE_AT = "exam_cache_at" // 缓存写入时间,考试页显示"更新于"
+    const val KEY_GRADE_CACHE = "grade_cache"     // 全量成绩缓存(所有学期一次抓,离线也能看)
+    const val KEY_GRADE_CACHE_AT = "grade_cache_at" // 缓存写入时间,成绩页显示"更新于"
         const val KEY_SEL_CACHE = "selection_cache"
         const val KEY_SCHED_SOURCE = "schedule_source" // AUTO=联网 / MANUAL=手动导入
         const val KEY_UPDATE_CHECK = "update_last_check"
@@ -324,6 +332,35 @@ class SettingsStore(context: Context) {
         get() = prefs.getString(KEY_WATER_TOKEN, null) ?: ""
         set(v) = prefs.edit().putString(KEY_WATER_TOKEN, v).apply()
 
+    /** 积分会话 token(ApplicationType 1,5)。与设备会话 token 不通用:两者任务列表互补 */
+    var waterPointsToken: String
+        get() = prefs.getString(KEY_WATER_POINTS_TOKEN, null) ?: ""
+        set(v) = prefs.edit().putString(KEY_WATER_POINTS_TOKEN, v).apply()
+
+    var waterPointsUid: String
+        get() = prefs.getString(KEY_WATER_POINTS_UID, null) ?: ""
+        set(v) = prefs.edit().putString(KEY_WATER_POINTS_UID, v).apply()
+
+    /** 积分登录用过的手机号,下次预填(积分通道与设备通道同号,但仍分开存) */
+    var waterPointsPhone: String
+        get() = prefs.getString(KEY_WATER_POINTS_PHONE, null) ?: ""
+        set(v) = prefs.edit().putString(KEY_WATER_POINTS_PHONE, v).apply()
+
+    /** 每日自动运行积分任务(到点由前台服务/进页面时触发一次) */
+    var waterAutoPoints: Boolean
+        get() = prefs.getBoolean(KEY_WATER_AUTO_POINTS, false)
+        set(v) = prefs.edit().putBoolean(KEY_WATER_AUTO_POINTS, v).apply()
+
+    /** 自动积分抵扣(下单时用积分抵现金,对应 acc/upt useScore) */
+    var waterAutoDeduct: Boolean
+        get() = prefs.getBoolean(KEY_WATER_AUTO_DEDUCT, false)
+        set(v) = prefs.edit().putBoolean(KEY_WATER_AUTO_DEDUCT, v).apply()
+
+    /** 上一次自动跑积分任务的日期(yyyyMMdd),同一天不重复跑 */
+    var waterPointsDay: String
+        get() = prefs.getString(KEY_WATER_POINTS_DAY, null) ?: ""
+        set(v) = prefs.edit().putString(KEY_WATER_POINTS_DAY, v).apply()
+
     var washerToken: String
         get() = prefs.getString(KEY_WASHER_TOKEN, null) ?: ""
         set(v) = prefs.edit().putString(KEY_WASHER_TOKEN, v).apply()
@@ -582,6 +619,49 @@ class SettingsStore(context: Context) {
 
     /** 考试缓存写入时间(0 = 从未缓存过) */
     val examsCachedAtMillis: Long get() = prefs.getLong(KEY_EXAM_CACHE_AT, 0L)
+
+    // ---------- 成绩缓存(离线查看 + 失败回退) ----------
+
+    fun cacheGrades(grades: List<Grade>) {
+        val arr = JSONArray()
+        for (g in grades) {
+            arr.put(JSONObject().apply {
+                put("course", g.course)
+                put("score", g.score)
+                put("credit", g.credit)
+                put("point", g.gradePoint)
+                put("type", g.type)
+                put("examType", g.examType)
+                put("term", g.term)
+            })
+        }
+        prefs.edit()
+            .putString(KEY_GRADE_CACHE, arr.toString())
+            .putLong(KEY_GRADE_CACHE_AT, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun loadCachedGrades(): List<Grade> {
+        val raw = prefs.getString(KEY_GRADE_CACHE, null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                Grade(
+                    course = o.optString("course"),
+                    score = o.optString("score"),
+                    credit = o.optString("credit"),
+                    gradePoint = o.optString("point"),
+                    type = o.optString("type"),
+                    examType = o.optString("examType"),
+                    term = o.optString("term"),
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /** 成绩缓存写入时间(0 = 从未缓存过) */
+    val gradesCachedAtMillis: Long get() = prefs.getLong(KEY_GRADE_CACHE_AT, 0L)
 
     /** 选课缓存:轮次 + 已选课程 + 抓取时间(选课接口有风控,频控在调用方做) */
     data class SelCache(
