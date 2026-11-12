@@ -354,6 +354,9 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 if (pointsState.smsCooldown > 0) {
                     pointsState = pointsState.copy(smsCooldown = pointsState.smsCooldown - 1)
                 }
+                if (pointsState.captchaCooldown > 0) {
+                    pointsState = pointsState.copy(captchaCooldown = pointsState.captchaCooldown - 1)
+                }
                 if (washerSmsCooldown > 0) washerSmsCooldown--
             }
         }
@@ -552,8 +555,14 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
     private fun moneyText(v: Double, refund: Boolean = false): String =
         (if (refund) "+¥" else "¥") + String.format(java.util.Locale.US, "%.2f", kotlin.math.abs(v))
 
-    fun newPointsCaptcha() {
+    /**
+     * 拉一张图形验证码。默认受冷却限制(连点会被服务端当刷码),
+     * 登录失败/短信失败这种"旧码已作废"的场景传 force = true 绕过。
+     */
+    fun newPointsCaptcha(force: Boolean = false) {
+        if (!force && pointsState.captchaCooldown > 0) return
         pointsCaptchaKey = IlifeClient.newCaptchaKey()
+        pointsState = pointsState.copy(captchaCooldown = 10)
         val url = ilife.captchaUrl(pointsCaptchaKey)
         viewModelScope.launch {
             val bmp: android.graphics.Bitmap? = withContext(Dispatchers.IO) {
@@ -570,7 +579,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
 
     /** 积分通道发短信:走小程序通道(1,5),与设备通道的短信接口不是同一套版本号 */
     fun pointsSendSms() {
-        if (pointsState.smsCooldown > 0) return
+        if (pointsState.smsCooldown > 0 || pointsState.loading) return
         pointsState = pointsState.copy(loading = true, message = null)
         viewModelScope.launch {
             val r = ilife.sendSms(
@@ -582,9 +591,13 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             pointsState = pointsState.copy(
                 loading = false,
                 smsSent = r.ok,
-                smsCooldown = if (r.ok) 60 else 0,
+                // 成功 60 秒;失败也给 30 秒,防连点把账号打成风控
+                smsCooldown = if (r.ok) 60 else 30,
+                captchaInput = if (r.ok) pointsState.captchaInput else "",
                 message = if (r.ok) "短信已发送" else "发送失败:" + IlifeClient.readable(r.code, r.msg),
             )
+            // 短信接口会吃掉这张图形码,失败后换一张再让用户重试
+            if (!r.ok) newPointsCaptcha(force = true)
         }
     }
 
@@ -594,7 +607,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val r = ilife.login(pointsState.phone.trim(), pointsState.smsCode.trim(), mini = true)
             if (!r.ok) {
-                newPointsCaptcha()
+                newPointsCaptcha(force = true)
                 pointsState = pointsState.copy(
                     loading = false,
                     message = "登录失败:" + IlifeClient.readable(r.code, r.msg),
@@ -605,7 +618,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             val tk = ilife.extractToken(json)
             val uid = ilife.extractUid(json)
             if (tk.isBlank()) {
-                newPointsCaptcha()
+                newPointsCaptcha(force = true)
                 pointsState = pointsState.copy(loading = false, message = "登录返回异常:未获取到凭证")
                 return@launch
             }
@@ -617,6 +630,7 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
             pointsState = pointsState.copy(
                 loggedIn = true, loading = false, message = null,
                 smsCode = "", captchaInput = "", smsSent = false, smsCooldown = 0,
+                captchaCooldown = 0,
             )
             // 自动抵扣是账号级开关,登录后按本地开关态对齐一次服务端
             if (pointsState.autoDeduct) runCatching { ilife.setUseScore(tk, true) }
@@ -2109,13 +2123,21 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
                 if (!fresh) {
                     val page = client.fetchAllGrades()
                     if (reqId != gradeReqId) return@launch   // 过期响应:丢弃
-                    allGrades = page.items
                     gradeFetchedAt = System.currentTimeMillis()
-                    // 全量成绩落本地缓存:下次进页面先上屏再看网络,离线也有得看
-                    runCatching { settings.cacheGrades(allGrades) }
-                    gradesCachedAt = settings.gradesCachedAtMillis
-                    gradeFromCache = false
-                    applyGradeSemesters()
+                    if (page.items.isNotEmpty()) {
+                        allGrades = page.items
+                        // 全量成绩落本地缓存:下次进页面先上屏再看网络,离线也有得看
+                        runCatching { settings.cacheGrades(allGrades, account) }
+                        gradesCachedAt = settings.gradesCachedAtMillis
+                        gradeFromCache = false
+                        applyGradeSemesters()
+                    } else {
+                        // 服务端返回空(多半是没评教/本学期还没出分):不拿空表覆盖已有缓存
+                        if (allGrades.isEmpty()) primeGradesFromCache()
+                        if (allGrades.isEmpty()) {
+                            gradeError = "暂无成绩:未完成教学评价时教务不返回成绩"
+                        }
+                    }
                 }
                 if (reqId != gradeReqId) return@launch
                 grades = if (gradeSem.isAll) allGrades else allGrades.filter { it.term == gradeSem.key }
@@ -2142,7 +2164,8 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
      */
     private fun primeGradesFromCache(): Boolean {
         if (allGrades.isNotEmpty()) return true
-        val cached = runCatching { settings.loadCachedGrades() }.getOrDefault(emptyList())
+        // 传学号:缓存属于别的账号时 loadCachedGrades 直接返回空表
+        val cached = runCatching { settings.loadCachedGrades(account) }.getOrDefault(emptyList())
         if (cached.isEmpty()) return false
         allGrades = cached
         gradesCachedAt = settings.gradesCachedAtMillis
@@ -2275,6 +2298,12 @@ class AppViewModel(app: android.app.Application) : AndroidViewModel(app) {
         loggedIn = false
         account = ""; password = ""
         name = null   // 否则退登后头部仍显示旧姓名,与"未登录"矛盾
+        // 成绩/考试缓存带学号,退登必须一起清掉,否则换个账号登录会先看到上一个人的数据
+        runCatching { settings.clearGradeCache() }
+        runCatching { settings.clearExamCache() }
+        allGrades = emptyList(); gradeFromCache = false; gradesCachedAt = 0L
+        gradeSemesters = emptyList(); gradeSem = Semester.ALL; gradeFetchedAt = 0L; gradeError = null
+        examFromCache = false; examsCachedAt = 0L
         courses = emptyList(); grades = emptyList()
         xkRounds = emptyList(); selectedCourses = emptyList(); selectionLoaded = false; selCacheTime = 0; selCacheSem = ""
         allCourses = emptyList(); schedLoaded = false
@@ -2483,12 +2512,10 @@ class MainActivity : ComponentActivity() {
                             onOpenWasherScan = { navController.navigate("washerscan") },
                             onOpenScan = { navController.navigate("scan") },
                             onOpenJwxtLogin = { navController.navigate("login") },
+                            // 未登录也放行:成绩页自己提示未登录并给登录入口,同时还能看本机缓存
                             onOpenGradesNav = {
-                                if (!vm.loggedIn) navController.navigate("login")
-                                else {
-                                    if (vm.grades.isEmpty()) vm.loadGrades()
-                                    navController.navigate("grades")
-                                }
+                                if (vm.loggedIn && vm.grades.isEmpty()) vm.loadGrades()
+                                navController.navigate("grades")
                             },
                             onOpenAbout = { navController.navigate("about") },
                             onEvaluate = {
@@ -2635,6 +2662,8 @@ class MainActivity : ComponentActivity() {
                             onRetry = { vm.loadGrades() },
                             fromCache = vm.gradeFromCache,
                             cachedAtMillis = vm.gradesCachedAt,
+                            loggedIn = vm.loggedIn,
+                            onLogin = { navController.navigate("login") },
                             onEvaluate = {
                                 WebViewActivity.webSession = vm.client.cookieHeader()
                                 WebViewActivity.webvpnMode = vm.webvpnEnabled

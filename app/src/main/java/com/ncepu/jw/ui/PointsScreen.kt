@@ -331,32 +331,65 @@ private fun LoginFormCard(
                 // 图纸固定占位:没拉到时点一下就能取,别让输入框孤零零挂在那里
                 Spacer(Modifier.width(10.dp))
                 val bmp = state.captchaBmp
+                // 冷却期内不响应点击(服务端按频率判刷码),遮罩上直接把剩余秒数画出来
+                val canRefresh = state.captchaCooldown <= 0 && !state.loading
+                val captchaLabel = when {
+                    state.captchaCooldown > 0 -> "${state.captchaCooldown}s"
+                    state.loading -> "加载中"
+                    else -> "点击获取"
+                }
                 if (bmp != null) {
-                    Image(
-                        bitmap = bmp,
-                        contentDescription = "图形验证码,点击刷新",
-                        modifier = Modifier
+                    Box(
+                        Modifier
                             .size(width = 92.dp, height = 56.dp)
-                            .clip(ChipShape)
-                            .clickable(onClick = onRefreshCaptcha),
-                    )
+                            .clip(ChipShape),
+                    ) {
+                        Image(
+                            bitmap = bmp,
+                            contentDescription = "图形验证码,点击刷新",
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clickable(enabled = canRefresh, onClick = onRefreshCaptcha),
+                        )
+                        if (state.captchaCooldown > 0) {
+                            Box(
+                                Modifier
+                                    .fillMaxSize()
+                                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    captchaLabel,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
+                        }
+                    }
                 } else {
                     Box(
                         Modifier
                             .size(width = 92.dp, height = 56.dp)
                             .clip(ChipShape)
                             .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-                            .clickable(onClick = onRefreshCaptcha),
+                            .clickable(enabled = canRefresh, onClick = onRefreshCaptcha),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            if (state.loading) "加载中" else "点击获取",
+                            captchaLabel,
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
             }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "图形码 10 秒可刷新一次,短信 60 秒可重发",
+                fontSize = 10.sp,
+                color = secondaryColor,
+            )
             Spacer(Modifier.height(10.dp))
 
             Row(verticalAlignment = Alignment.CenterVertically) {

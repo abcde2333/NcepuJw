@@ -30,6 +30,8 @@ data class PointsUiState(
     val smsCode: String = "",
     val captchaInput: String = "",
     val captchaBmp: ImageBitmap? = null,
+    /** 图形验证码刷新冷却(秒);>0 时点图不重新拉取,避免连点被服务端判成刷码 */
+    val captchaCooldown: Int = 0,
     val smsSent: Boolean = false,
     val smsCooldown: Int = 0,
     /** 建议文案:未登录时提示用哪个手机号登录积分通道 */

@@ -102,24 +102,24 @@ fun ProfileScreen(
         SectionLabel("账号")
         GroupCard(bgEnabled, glassBackdrop) {
             AccountRow(name, account, loggedIn)
+            RowDivider()
+            // 登录/退出都归账号卡:未登录给登录入口,已登录给退出
             if (loggedIn) {
-                RowDivider()
                 GroupRow(
                     Icons.Filled.Logout, "退出登录", c.error,
                     onClick = { confirmLogout = true },
                 )
+            } else {
+                GroupRow(Icons.Filled.Login, "登录教务系统", c.primary, onOpenJwxtLogin)
             }
         }
 
         SectionLabel("应用")
         GroupCard(bgEnabled, glassBackdrop) {
-            if (loggedIn) {
-                GroupRow(Icons.Filled.BarChart, "成绩查询", c.primary, onOpenGrades)
-                RowDivider()
-            } else {
-                GroupRow(Icons.Filled.Login, "登录教务系统", c.primary, onOpenJwxtLogin)
-                RowDivider()
-            }
+            // 成绩入口不看登录态:冷启动/断网时 loggedIn=false,但缓存能看,
+            // 直接进成绩页,由页面自己决定显示缓存还是登录引导
+            GroupRow(Icons.Filled.BarChart, "成绩查询", c.primary, onOpenGrades)
+            RowDivider()
             GroupRow(Icons.Filled.LocalLaundryService, "U净洗衣", c.primary, onOpenWasher)
             RowDivider()
             GroupRow(Icons.Filled.MenuBook, "培养方案", c.primary, onOpenPyfa)
@@ -233,7 +233,7 @@ private fun AccountRow(name: String?, account: String, loggedIn: Boolean) {
     val title = name?.takeIf { it.isNotBlank() }
         ?: account.ifBlank { if (loggedIn) "已登录" else "未登录" }
     val subtitle = when {
-        !loggedIn -> "在下方「应用」里登录教务系统"
+        !loggedIn -> "点下方「登录教务系统」输入账号"
         name.isNullOrBlank() -> "已登录"
         else -> "学号 $account"
     }

@@ -73,6 +73,10 @@ fun GradeScreen(
     bgEnabled: Boolean = false,
     /** 毛玻璃采样源(MainActivity 的隐形壁纸副本) */
     glassBackdrop: Backdrop? = null,
+    /** 是否已登录教务:未登录也能进成绩页看本机缓存,只提示去登录 */
+    loggedIn: Boolean = true,
+    /** 未登录时的登录入口 */
+    onLogin: () -> Unit = {},
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var sort by rememberSaveable { mutableStateOf(0) }      // 0 默认 1 学期 2 成绩 3 学分
@@ -112,8 +116,28 @@ fun GradeScreen(
             return@Column
         }
 
+        if (!loggedIn) {
+            LoginNotice(onLogin)
+        }
+
         if (fromCache && grades.isNotEmpty()) {
             CacheBanner(cachedAtMillis, onRetry)
+        }
+
+        // 未登录且本机没有缓存:直接给登录入口,别让用户对着空汇总卡发呆
+        if (!loggedIn && grades.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    EmptyState(
+                        Icons.Filled.BarChart,
+                        "未登录教务系统",
+                        "登录后可查看成绩、学分绩与排名",
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    LoginButton(onLogin)
+                }
+            }
+            return@Column
         }
 
         // ---- 汇总:全部课程口径(对齐教务「成绩预览」单)+ 必修学分绩 ----
@@ -293,6 +317,64 @@ fun GradeScreen(
 }
 
 private fun fmt2(v: Double?): String = v?.let { String.format(Locale.US, "%.2f", it) } ?: "--"
+
+/** 未登录提示条:带「去登录」按钮,与缓存横幅同一套视觉 */
+@Composable
+private fun LoginNotice(onLogin: () -> Unit) {
+    GlassCard(
+        bgEnabled = false,
+        backdrop = null,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(14.dp),
+        tintOverride = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.BarChart,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                "未登录教务系统,当前只显示本机缓存",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+            )
+            Text(
+                "去登录",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onLogin() }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+        }
+    }
+}
+
+/** 空态里的登录按钮:主色胶囊,和「关于」页按钮同款圆角 */
+@Composable
+private fun LoginButton(onLogin: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(MaterialTheme.colorScheme.primary)
+            .clickable { onLogin() }
+            .padding(horizontal = 22.dp, vertical = 10.dp),
+    ) {
+        Text(
+            "登录教务系统",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onPrimary,
+        )
+    }
+}
 
 /** 「正在查看缓存」提示:中性底色(不是错误色),右侧可点刷新 */
 @Composable

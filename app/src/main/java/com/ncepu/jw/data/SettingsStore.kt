@@ -70,6 +70,7 @@ class SettingsStore(context: Context) {
         const val KEY_EXAM_CACHE_AT = "exam_cache_at" // 缓存写入时间,考试页显示"更新于"
     const val KEY_GRADE_CACHE = "grade_cache"     // 全量成绩缓存(所有学期一次抓,离线也能看)
     const val KEY_GRADE_CACHE_AT = "grade_cache_at" // 缓存写入时间,成绩页显示"更新于"
+    const val KEY_GRADE_CACHE_ACCOUNT = "grade_cache_account" // 缓存归属学号:换账号后旧缓存必须失效
         const val KEY_SEL_CACHE = "selection_cache"
         const val KEY_SCHED_SOURCE = "schedule_source" // AUTO=联网 / MANUAL=手动导入
         const val KEY_UPDATE_CHECK = "update_last_check"
@@ -622,7 +623,7 @@ class SettingsStore(context: Context) {
 
     // ---------- 成绩缓存(离线查看 + 失败回退) ----------
 
-    fun cacheGrades(grades: List<Grade>) {
+    fun cacheGrades(grades: List<Grade>, account: String = "") {
         val arr = JSONArray()
         for (g in grades) {
             arr.put(JSONObject().apply {
@@ -638,10 +639,20 @@ class SettingsStore(context: Context) {
         prefs.edit()
             .putString(KEY_GRADE_CACHE, arr.toString())
             .putLong(KEY_GRADE_CACHE_AT, System.currentTimeMillis())
+            .putString(KEY_GRADE_CACHE_ACCOUNT, account)
             .apply()
     }
 
-    fun loadCachedGrades(): List<Grade> {
+    /**
+     * 读成绩缓存。
+     * account 非空且缓存里记了别的学号时返回空表——退出登录/换账号后不能拿别人的成绩顶上来。
+     * 老缓存没有账号字段(升级前的数据)照样放行,下次写入会补上。
+     */
+    fun loadCachedGrades(account: String = ""): List<Grade> {
+        val cachedAccount = prefs.getString(KEY_GRADE_CACHE_ACCOUNT, null).orEmpty()
+        if (account.isNotBlank() && cachedAccount.isNotBlank() && cachedAccount != account) {
+            return emptyList()
+        }
         val raw = prefs.getString(KEY_GRADE_CACHE, null) ?: return emptyList()
         return runCatching {
             val arr = JSONArray(raw)
@@ -662,6 +673,18 @@ class SettingsStore(context: Context) {
 
     /** 成绩缓存写入时间(0 = 从未缓存过) */
     val gradesCachedAtMillis: Long get() = prefs.getLong(KEY_GRADE_CACHE_AT, 0L)
+
+    /** 清成绩缓存(退出登录/换账号时调用) */
+    fun clearGradeCache() {
+        prefs.edit()
+            .remove(KEY_GRADE_CACHE).remove(KEY_GRADE_CACHE_AT).remove(KEY_GRADE_CACHE_ACCOUNT)
+            .apply()
+    }
+
+    /** 清考试缓存:同上,考试列表也带学号,换账号不能留 */
+    fun clearExamCache() {
+        prefs.edit().remove(KEY_EXAM_CACHE).remove(KEY_EXAM_CACHE_AT).apply()
+    }
 
     /** 选课缓存:轮次 + 已选课程 + 抓取时间(选课接口有风控,频控在调用方做) */
     data class SelCache(
